@@ -8,6 +8,7 @@ import customtkinter as ctk
 from core.data_model import CALENDAR_MODES, STUDY_FORMS, suggest_age_spans
 from gui.theme import FONT, FONT_S, LINE, MUTED, NAVY
 from gui.tooltip import tooltip
+from gui.calendar_dialog import CalendarDialog
 from gui.widgets import (
     LabeledCombo,
     LabeledEntry,
@@ -20,6 +21,10 @@ from gui.widgets import (
     secondary_button,
     set_checkbox,
 )
+from core.holidays import region_holiday_title
+from core.planning import active_holiday_extra, effective_class_days
+
+_DAY_NAMES = ("Пн", "Вт", "Ср", "Чт", "Пт", "Сб", "Вс")
 
 
 class StepLearners(ctk.CTkScrollableFrame):
@@ -47,8 +52,30 @@ class StepLearners(ctk.CTkScrollableFrame):
         self.lesson = LabeledCombo(body, "Длительность занятия, ак. ч.", ["1", "2", "3", "4"], required=True)
         self.lesson.grid(row=1, column=1, sticky="ew", padx=(8, 0), pady=(0, 10))
 
-        self.per_week = LabeledCombo(body, "Занятий в неделю", ["1", "2", "3", "4", "5", "6"], required=True)
-        self.per_week.grid(row=2, column=0, sticky="ew", padx=(0, 8), pady=(0, 10))
+        days_box = ctk.CTkFrame(body, fg_color="white")
+        days_box.grid(row=2, column=0, sticky="ew", padx=(0, 8), pady=(0, 10))
+        ctk.CTkLabel(days_box, text="Дни занятий *", font=FONT_S, text_color=NAVY, anchor="w").pack(anchor="w")
+        days_row = ctk.CTkFrame(days_box, fg_color="white")
+        days_row.pack(anchor="w", pady=(4, 0))
+        self._day_boxes: list[ctk.CTkCheckBox] = []
+        self._mute_days = False
+        for name in _DAY_NAMES:
+            box = ctk.CTkCheckBox(
+                days_row,
+                text=name,
+                width=54,
+                font=FONT,
+                text_color="#1A1A1A",
+                fg_color=NAVY,
+                hover_color="#0B655E",
+                border_color=LINE,
+                checkmark_color="white",
+                command=self._days_changed,
+            )
+            box.pack(side="left", padx=(0, 2))
+            self._day_boxes.append(box)
+        self.days_count = ctk.CTkLabel(days_box, text="", font=FONT_S, text_color=MUTED, anchor="w")
+        self.days_count.pack(anchor="w", pady=(4, 0))
         self.weekly = LabeledEntry(body, "Часов в неделю", required=True)
         self.weekly.grid(row=2, column=1, sticky="ew", padx=(8, 0), pady=(0, 10))
 
@@ -76,9 +103,29 @@ class StepLearners(ctk.CTkScrollableFrame):
         self.study_form.grid(row=6, column=0, columnspan=2, sticky="ew", pady=(0, 10))
         self.calendar = LabeledCombo(body, "Календарный график", CALENDAR_MODES, required=True)
         self.calendar.grid(row=7, column=0, columnspan=2, sticky="ew", pady=(0, 8))
+        calendar_actions = ctk.CTkFrame(body, fg_color="white")
+        calendar_actions.grid(row=8, column=0, columnspan=2, sticky="ew", pady=(0, 4))
+        self.calendar_button = secondary_button(calendar_actions, "Недели занятий", self._open_calendar)
+        self.calendar_button.pack(side="left")
+        tooltip(
+            self.calendar_button,
+            "Сначала отметьте дни недели. Календарь подсветит их. Если день праздничный, занятие сдвигается на следующий свободный.",
+        )
+        self.calendar_note = ctk.CTkLabel(
+            body,
+            text="",
+            font=FONT_S,
+            text_color=MUTED,
+            anchor="w",
+            justify="left",
+            wraplength=820,
+        )
+        self.calendar_note.grid(row=9, column=0, columnspan=2, sticky="ew", pady=(0, 8))
+        self._class_weeks: list[str] = []
+        self._custom_weeks = False
 
         self.differentiate = checkbox(body, "Дифференцировать задания по возрастным промежуткам")
-        self.differentiate.grid(row=8, column=0, columnspan=2, sticky="w", pady=(4, 0))
+        self.differentiate.grid(row=10, column=0, columnspan=2, sticky="w", pady=(4, 0))
         self.differentiate.configure(command=self._toggle_spans)
         tooltip(
             self.differentiate,
@@ -86,7 +133,7 @@ class StepLearners(ctk.CTkScrollableFrame):
         )
 
         self.spans_box = ctk.CTkFrame(body, fg_color="white")
-        self.spans_box.grid(row=9, column=0, columnspan=2, sticky="ew", pady=(8, 0))
+        self.spans_box.grid(row=11, column=0, columnspan=2, sticky="ew", pady=(8, 0))
         self.spans_box.grid_columnconfigure(0, weight=1)
         ctk.CTkLabel(
             self.spans_box,
@@ -118,7 +165,7 @@ class StepLearners(ctk.CTkScrollableFrame):
         self._span_rows: list[tuple[ctk.CTkFrame, ctk.CTkEntry, ctk.CTkEntry]] = []
 
         self.no_prior = checkbox(body, "Без предварительной подготовки, свободный набор")
-        self.no_prior.grid(row=10, column=0, columnspan=2, sticky="w", pady=(8, 0))
+        self.no_prior.grid(row=12, column=0, columnspan=2, sticky="w", pady=(8, 0))
         tooltip(self.no_prior, "В адресате будет сказано, что до первого занятия отбора и подготовки нет.")
 
         self.calc_hint = ctk.CTkLabel(
@@ -139,7 +186,9 @@ class StepLearners(ctk.CTkScrollableFrame):
         )
         for widget in (self.total.entry, self.weekly.entry):
             widget.bind("<KeyRelease>", lambda _event: self._refresh_calc())
+        self.weeks.entry.bind("<KeyRelease>", lambda _event: self._weeks_edited(), add="+")
         self.years.combo.configure(command=lambda _value: self._refresh_calc())
+        self.lesson.combo.configure(command=lambda _value: self._days_changed())
 
     def on_show(self) -> None:
         model = self.app.model
@@ -147,11 +196,14 @@ class StepLearners(ctk.CTkScrollableFrame):
         self.age_to.set(str(model.age_to) if model.age_to > 0 else "")
         self.years.set(str(model.years) if model.years > 0 else "1")
         self.lesson.set(str(model.lesson_hours) if model.lesson_hours > 0 else "2")
-        self.per_week.set(str(model.lessons_per_week) if model.lessons_per_week > 0 else "2")
+        self._show_days(effective_class_days(model.class_days, model.lessons_per_week))
         self.minutes.set(str(model.academic_minutes) if model.academic_minutes > 0 else "45")
         self.break_minutes.set(str(model.break_minutes))
         self.total.set(str(model.total_hours) if model.total_hours > 0 else "")
         self.weeks.set(str(model.study_weeks) if model.study_weeks > 0 else "36")
+        self._class_weeks = list(model.class_weeks)
+        self._custom_weeks = bool(self._class_weeks)
+        self._refresh_calendar_note()
         self.weekly.set(str(model.hours_per_week) if model.hours_per_week > 0 else "")
         self.group_min.set(str(model.group_min) if model.group_min > 0 else "")
         self.group_max.set(str(model.group_max) if model.group_max > 0 else "")
@@ -170,11 +222,18 @@ class StepLearners(ctk.CTkScrollableFrame):
         model.age_to = parse_int(self.age_to.get())
         model.years = parse_int(self.years.get())
         model.lesson_hours = parse_int(self.lesson.get())
-        model.lessons_per_week = parse_int(self.per_week.get())
+        days = self._selected_days()
+        model.class_days = days
+        model.lessons_per_week = len(days)
         model.academic_minutes = parse_int(self.minutes.get())
         model.break_minutes = parse_int(self.break_minutes.get())
         model.total_hours = parse_int(self.total.get())
-        model.study_weeks = parse_int(self.weeks.get())
+        typed_weeks = parse_int(self.weeks.get())
+        if self._custom_weeks and typed_weeks == len(self._class_weeks):
+            model.class_weeks = list(self._class_weeks)
+        else:
+            model.class_weeks = []
+        model.study_weeks = typed_weeks
         model.hours_per_week = parse_int(self.weekly.get())
         model.group_min = parse_int(self.group_min.get())
         model.group_max = parse_int(self.group_max.get())
@@ -186,6 +245,71 @@ class StepLearners(ctk.CTkScrollableFrame):
 
     def validate(self) -> list[str]:
         return self.app.model.errors_learners()
+
+    def _weeks_edited(self) -> None:
+        if self._custom_weeks and parse_int(self.weeks.get()) != len(self._class_weeks):
+            self._custom_weeks = False
+            self._refresh_calendar_note()
+
+    def _open_calendar(self) -> None:
+        self.save()
+        CalendarDialog(self.app, self._apply_weeks)
+
+    def _selected_days(self) -> list[int]:
+        return [index for index, box in enumerate(self._day_boxes) if box.get()]
+
+    def _show_days(self, days: list[int]) -> None:
+        chosen = set(days)
+        self._mute_days = True
+        for index, box in enumerate(self._day_boxes):
+            set_checkbox(box, index in chosen)
+        self._mute_days = False
+        self._refresh_days_label()
+
+    def _days_changed(self) -> None:
+        if self._mute_days:
+            return
+        days = self._selected_days()
+        hours = parse_int(self.lesson.get())
+        if days and hours > 0:
+            self.weekly.set(str(len(days) * hours))
+        self._refresh_days_label()
+        self._refresh_calc()
+
+    def _refresh_days_label(self) -> None:
+        names = [name for name, box in zip(_DAY_NAMES, self._day_boxes) if box.get()]
+        if names:
+            self.days_count.configure(text=f"{len(names)} в неделю: {', '.join(names)}")
+        else:
+            self.days_count.configure(text="Отметьте хотя бы один день")
+
+    def _apply_weeks(self, weeks: list[str]) -> None:
+        model = self.app.model
+        self._class_weeks = list(weeks)
+        self._custom_weeks = True
+        if weeks:
+            self.weeks.set(str(len(weeks)))
+        self._show_days(list(model.class_days))
+        if model.hours_per_week > 0:
+            self.weekly.set(str(model.hours_per_week))
+        self._refresh_calendar_note()
+        self.save()
+
+    def _refresh_calendar_note(self) -> None:
+        model = self.app.model
+        title = region_holiday_title(model.region)
+        extra = active_holiday_extra(model)
+        if extra:
+            scope = f"праздники России и {len(extra)} дополнительных дней региона от модели"
+        elif title:
+            scope = f"праздники России и {title}"
+        else:
+            scope = "праздники России. Дополнительные дни региона запрашиваются в «Неделях занятий»"
+        if self._custom_weeks and self._class_weeks:
+            text = f"Отмечено недель: {len(self._class_weeks)}. Праздничный день переносит занятие. Учитываются {scope}."
+        else:
+            text = f"Недели пока не выбраны: возьмутся первые учебные недели графика. Учитываются {scope}."
+        self.calendar_note.configure(text=text)
 
     def _toggle_spans(self) -> None:
         if bool(self.differentiate.get()):

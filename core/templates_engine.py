@@ -8,14 +8,17 @@
 from __future__ import annotations
 
 import json
+from datetime import date, timedelta
 from functools import lru_cache
 
 from core.data_model import LEVEL_FULL, LEVEL_METHOD, ProgramData
 from core.generator import normalize_module_row
 from core.paths import text_blocks_dir
 from core.planning import (
+    active_holiday_extra,
     build_calendar_rows,
     detect_role,
+    effective_class_days,
     holiday_note,
     hours_word,
     lesson_dates,
@@ -388,7 +391,13 @@ def build_context(program: ProgramData) -> dict:
             "При электронном обучении или дистанционных технологиях академический час может быть короче — по локальному акту организации."
         ),
         _calendar_sentence(program.calendar_mode),
-        holiday_note(program.year, program.calendar_mode),
+        holiday_note(
+            program.year,
+            program.calendar_mode,
+            program.region,
+            program.years,
+            extra=active_holiday_extra(program),
+        ),
     ]
     features = [fmt(phrases["features_base"], mapping), _regional_paragraph(program, phrases, mapping)]
     if program.no_prior_training:
@@ -530,16 +539,37 @@ def build_context(program: ProgramData) -> dict:
             }
         )
 
-    for row, planned in zip(ktp_rows, lesson_dates(program.year, len(ktp_rows), program.lessons_per_week, program.calendar_mode)):
+    for row, planned in zip(
+        ktp_rows,
+        lesson_dates(
+            program.year,
+            len(ktp_rows),
+            program.lessons_per_week,
+            program.calendar_mode,
+            program.region,
+            program.class_weeks,
+            program.years,
+            extra=active_holiday_extra(program),
+            weekdays=effective_class_days(program.class_days, program.lessons_per_week),
+        ),
+    ):
         row["date"] = planned
 
+    personal = spoken.get("personal_results") or [fmt(item, mapping) for item in phrases["personal_results"]]
+    meta = spoken.get("meta_results") or [fmt(item, mapping) for item in phrases["meta_results"]]
     results: list[str] = [fmt(phrases["subject_intro"], mapping), "Личностные результаты:"]
-    results.extend(f"— {fmt(item, mapping)}" for item in phrases["personal_results"])
+    results.extend(f"— {item.lstrip('—-• ').strip()}" for item in personal)
     results.append("Метапредметные результаты:")
-    results.extend(f"— {fmt(item, mapping)}" for item in phrases["meta_results"])
-    for band in bands:
+    results.extend(f"— {item.lstrip('—-• ').strip()}" for item in meta)
+    if spoken.get("subject"):
+        results.append("Предметные результаты:")
+        results.extend(f"— {item.lstrip('—-• ').strip()}" for item in spoken["subject"])
+        bands_for_subject: list[dict[str, str]] = []
+    else:
+        bands_for_subject = bands
+    for band in bands_for_subject:
         results.append(f"Предметные результаты для обучающихся {band['label']}:")
-        pool = list(spoken.get("subject") or [fmt(item, mapping) for item in voice["subject"]])
+        pool = [fmt(item, mapping) for item in voice["subject"]]
         pool.extend(phrases["subject_common"])
         if band["tone"] == "young":
             pool.extend(phrases["subject_junior"])
@@ -556,10 +586,8 @@ def build_context(program: ProgramData) -> dict:
         results.append(fmt(support, mapping))
 
     equipment = program.equipment.strip() or profile["equipment"]
-    material = [
-        equipment,
-        phrases["conditions_material_extra"],
-    ]
+    material = _paragraphs_from_lines(equipment)
+    material.append(phrases["conditions_material_extra"])
     information = [phrases["conditions_software_extra"]]
     staffing = [fmt(phrases["conditions_staff"], mapping)]
     sanitary = [fmt(phrases["conditions_sanitary"], mapping)]
@@ -603,7 +631,15 @@ def build_context(program: ProgramData) -> dict:
         item = phrases["criterion_regional"]
         criteria.append({key: fmt(item[key], mapping) for key in ("name", "low", "mid", "high")})
 
-    calendar_rows = build_calendar_rows(program.calendar_mode, program.years, program.total_hours)
+    calendar_rows = build_calendar_rows(
+        program.calendar_mode,
+        program.years,
+        program.total_hours,
+        program.year,
+        program.region,
+        program.class_weeks,
+        active_holiday_extra(program),
+    )
     ktp_hours = sum(int(row["hours"]) for row in ktp_rows)
 
     bullet = lambda lines: [f"— {line}" if not line.startswith("—") else line for line in lines]
@@ -780,6 +816,15 @@ def build_context(program: ProgramData) -> dict:
 
 
 def _period_edge(program: ProgramData, start: bool) -> str:
+    mondays = []
+    for item in program.class_weeks:
+        try:
+            mondays.append(date.fromisoformat(item))
+        except ValueError:
+            continue
+    if mondays:
+        edge = min(mondays) if start else max(mondays) + timedelta(days=6)
+        return edge.strftime("%d.%m.%Y")
     if program.calendar_mode.startswith("лето"):
         return f"01.06.{program.year}" if start else f"31.08.{program.year}"
     if program.calendar_mode.startswith("календарный"):
@@ -789,6 +834,12 @@ def _period_edge(program: ProgramData, start: bool) -> str:
 
 def _split_lines(text: str) -> list[str]:
     parts = [part.strip(" ;\t") for part in text.replace(";", "\n").splitlines()]
+    return [part for part in parts if part]
+
+
+def _paragraphs_from_lines(text: str) -> list[str]:
+    """Каждая строка списка — отдельный абзац. Иначе Word делает Shift+Enter и растягивает строку."""
+    parts = [part.strip() for part in text.replace("\r\n", "\n").replace("\r", "\n").split("\n")]
     return [part for part in parts if part]
 
 
@@ -820,7 +871,18 @@ def _spoken(program: ProgramData) -> dict:
     """Готовые формулировки под название. Пустые поля остаются на тексте направленности."""
     raw = program.generated if isinstance(program.generated, dict) else {}
     spoken: dict = {}
-    for key in ("relevance", "novelty", "distinctive", "expediency", "tasks", "subject", "addressee", "educating"):
+    for key in (
+        "relevance",
+        "novelty",
+        "distinctive",
+        "expediency",
+        "tasks",
+        "subject",
+        "addressee",
+        "educating",
+        "personal_results",
+        "meta_results",
+    ):
         items = _plain_list(raw.get(key))
         if items:
             spoken[key] = items

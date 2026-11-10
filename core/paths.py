@@ -11,7 +11,7 @@ from __future__ import annotations
 import sys
 from pathlib import Path
 
-VERSION = "1.1.0"
+VERSION = "1.2.0"
 APP_NAME = "ДопПро"
 GITHUB_REPO = "wenjiro/doppro"
 GITHUB_RELEASES = "https://github.com/wenjiro/doppro/releases"
@@ -51,6 +51,10 @@ def text_blocks_dir() -> Path:
 
 def modules_path() -> Path:
     return project_root() / "data" / "default_modules.json"
+
+
+def places_path() -> Path:
+    return project_root() / "data" / "places.json"
 
 
 def user_data_dir() -> Path:

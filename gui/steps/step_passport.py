@@ -8,7 +8,8 @@ import customtkinter as ctk
 from core.data_model import DIRECTIONS, LEVELS
 from gui.theme import FONT_S, MUTED
 from gui.tooltip import tooltip
-from gui.widgets import LabeledCombo, LabeledEntry, caption, card, hint, parse_int
+from core.places import places_for, regions
+from gui.widgets import LabeledCombo, LabeledEntry, SearchableCombo, caption, card, hint, parse_int
 
 
 class StepPassport(ctk.CTkScrollableFrame):
@@ -82,13 +83,36 @@ class StepPassport(ctk.CTkScrollableFrame):
         self.director_name = LabeledEntry(body, "ФИО руководителя", placeholder="Фамилия И.О.")
         self.director_name.grid(row=7, column=1, sticky="ew", padx=(8, 0), pady=(0, 10))
 
-        self.region = LabeledEntry(body, "Регион", required=True, placeholder="Регион")
+        self.region = SearchableCombo(
+            body,
+            "Регион",
+            regions(),
+            required=True,
+            tip="Все регионы России. Введите несколько букв и откройте список стрелкой или клавишей «вниз». Если региона нет, впишите его сами.",
+            on_commit=self._region_chosen,
+        )
         self.region.grid(row=8, column=0, sticky="ew", padx=(0, 8), pady=(0, 10))
-        self.city = LabeledEntry(body, "Город или населённый пункт", required=True, placeholder="Город")
+        self.city = SearchableCombo(
+            body,
+            "Город или населённый пункт",
+            [],
+            required=True,
+            tip="Пункты выбранного региона. Если вашего нет в списке, впишите название сами.",
+        )
         self.city.grid(row=8, column=1, sticky="ew", padx=(8, 0), pady=(0, 10))
 
+        ctk.CTkLabel(
+            body,
+            text="Регион и населённый пункт можно выбрать из списка или вписать свои, если их там нет.",
+            font=FONT_S,
+            text_color=MUTED,
+            anchor="w",
+            justify="left",
+            wraplength=860,
+        ).grid(row=9, column=0, columnspan=2, sticky="w", pady=(0, 10))
+
         self.year = LabeledEntry(body, "Год начала программы", required=True)
-        self.year.grid(row=9, column=0, sticky="ew", padx=(0, 8))
+        self.year.grid(row=10, column=0, sticky="ew", padx=(0, 8))
 
         ctk.CTkLabel(
             body,
@@ -98,7 +122,7 @@ class StepPassport(ctk.CTkScrollableFrame):
             anchor="w",
             justify="left",
             wraplength=420,
-        ).grid(row=9, column=1, sticky="w", padx=(8, 0))
+        ).grid(row=10, column=1, sticky="w", padx=(8, 0))
 
     def on_show(self) -> None:
         model = self.app.model
@@ -114,8 +138,15 @@ class StepPassport(ctk.CTkScrollableFrame):
         self.director_position.set(model.director_position)
         self.director_name.set(model.director_name)
         self.region.set(model.region)
+        self._region_chosen()
         self.city.set(model.city)
         self.year.set(str(model.year) if model.year > 0 else "")
+
+    def _region_chosen(self) -> None:
+        current = self.city.get() if hasattr(self, "city") else ""
+        self.city.set_choices(places_for(self.region.get()))
+        if current:
+            self.city.set(current)
 
     def save(self) -> None:
         model = self.app.model

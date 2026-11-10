@@ -10,7 +10,7 @@ from __future__ import annotations
 
 import json
 from dataclasses import dataclass, field
-from datetime import datetime
+from datetime import date, datetime
 from typing import Any
 
 # Шесть направленностей дополнительного образования.
@@ -149,6 +149,11 @@ class ProgramData:
     group_max: int = 12
     study_form: str = "очная"
     calendar_mode: str = "учебный год (сентябрь–май)"
+    # Понедельники недель, в которые идут занятия. Пустой список — первые учебные недели периода.
+    class_weeks: list = field(default_factory=list)
+    # Дополнительные праздники региона, которые назвала модель. Пусто — только встроенный перечень.
+    holiday_days: list = field(default_factory=list)
+    holiday_key: str = ""
     modules: list[ModuleItem] = field(default_factory=list)
     professional_trials: bool = False
     regional_project: bool = False
@@ -166,6 +171,10 @@ class ProgramData:
     director_position: str = "директор"
     director_name: str = ""
     lessons_per_week: int = 2
+    # 0 — понедельник … 6 — воскресенье. Пустой список — дни по числу занятий.
+    class_days: list = field(default_factory=list)
+    # Часы на сетке календаря. В текст документа не входят.
+    lesson_start: str = "15:00"
     academic_minutes: int = 45
     break_minutes: int = 10
     study_weeks: int = 36
@@ -204,6 +213,9 @@ class ProgramData:
             "group_max": self.group_max,
             "study_form": self.study_form,
             "calendar_mode": self.calendar_mode,
+            "class_weeks": list(self.class_weeks),
+            "holiday_days": list(self.holiday_days),
+            "holiday_key": self.holiday_key,
             "modules": [item.to_dict() for item in self.modules],
             "professional_trials": self.professional_trials,
             "regional_project": self.regional_project,
@@ -220,6 +232,8 @@ class ProgramData:
             "director_position": self.director_position,
             "director_name": self.director_name,
             "lessons_per_week": self.lessons_per_week,
+            "class_days": list(self.class_days),
+            "lesson_start": self.lesson_start,
             "academic_minutes": self.academic_minutes,
             "break_minutes": self.break_minutes,
             "study_weeks": self.study_weeks,
@@ -262,6 +276,8 @@ class ProgramData:
             "regional_notes",
             "study_form",
             "calendar_mode",
+            "holiday_key",
+            "lesson_start",
             "equipment",
             "software",
             "attestation_form",
@@ -281,6 +297,9 @@ class ProgramData:
         if not isinstance(data.generated, dict):
             data.generated = {}
         data.age_spans = _normalize_spans(getattr(data, "age_spans", []))
+        data.class_weeks = _normalize_weeks(getattr(data, "class_weeks", []))
+        data.class_days = _normalize_class_days(getattr(data, "class_days", []))
+        data.holiday_days = _normalize_holidays(getattr(data, "holiday_days", []))
         return data
 
     def save_draft(self) -> None:
@@ -419,8 +438,8 @@ class ProgramData:
             errors.append("Выберите форму обучения из списка.")
         if self.calendar_mode not in CALENDAR_MODES:
             errors.append("Выберите календарный режим из списка.")
-        if self.lessons_per_week < 1 or self.lessons_per_week > 6:
-            errors.append("Занятий в неделю — от 1 до 6.")
+        if self.lessons_per_week < 1 or self.lessons_per_week > 7:
+            errors.append("Отметьте дни занятий: от одного до семи.")
         elif self.lesson_hours in (1, 2, 3, 4) and self.hours_per_week > 0:
             expected = self.lessons_per_week * self.lesson_hours
             if expected != self.hours_per_week:
@@ -526,6 +545,54 @@ def _normalize_spans(raw: Any) -> list[dict[str, int]]:
             continue
         spans.append({"from": start, "to": end})
     return spans
+
+
+def _normalize_holidays(raw: Any) -> list[dict[str, str]]:
+    if not isinstance(raw, list):
+        return []
+    found: list[dict[str, str]] = []
+    seen: set[str] = set()
+    for item in raw:
+        if not isinstance(item, dict):
+            continue
+        text = str(item.get("date") or "").strip()
+        name = " ".join(str(item.get("name") or "").split())
+        if len(text) != 10 or text[4] != "-" or text[7] != "-" or text in seen or len(name) < 3:
+            continue
+        try:
+            date.fromisoformat(text)
+        except ValueError:
+            continue
+        seen.add(text)
+        found.append({"date": text, "name": name[:80]})
+        if len(found) >= 40:
+            break
+    return found
+
+
+def _normalize_class_days(raw: Any) -> list[int]:
+    if not isinstance(raw, list):
+        return []
+    found: list[int] = []
+    for item in raw:
+        try:
+            day = int(item)
+        except (TypeError, ValueError):
+            continue
+        if 0 <= day <= 6 and day not in found:
+            found.append(day)
+    return sorted(found)
+
+
+def _normalize_weeks(raw: Any) -> list[str]:
+    if not isinstance(raw, list):
+        return []
+    weeks: list[str] = []
+    for item in raw:
+        text = str(item or "").strip()
+        if len(text) == 10 and text[4] == "-" and text[7] == "-":
+            weeks.append(text)
+    return weeks
 
 
 def suggest_age_spans(age_from: int, age_to: int) -> list[dict[str, int]]:

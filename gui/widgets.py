@@ -7,6 +7,7 @@ import tkinter as tk
 
 import customtkinter as ctk
 
+from core.places import fold_search
 from gui.theme import BG, FONT, FONT_B, FONT_H, FONT_S, LINE, MUTED, NAVY
 from gui.tooltip import tooltip
 
@@ -38,6 +39,86 @@ class LabeledEntry(ctk.CTkFrame):
         self.entry.delete(0, "end")
         if value:
             self.entry.insert(0, value)
+
+
+class SearchableCombo(ctk.CTkFrame):
+    """Список с поиском. Если нужного пункта нет, в поле остаётся свой текст."""
+
+    def __init__(self, master, label: str, values: list[str], required: bool = False, tip: str = "", on_commit=None):
+        super().__init__(master, fg_color="transparent")
+        caption = label + (" *" if required else "")
+        ctk.CTkLabel(self, text=caption, anchor="w", font=FONT, text_color=NAVY).pack(fill="x")
+        self._all = list(values)
+        self._on_commit = on_commit
+        self.combo = ctk.CTkComboBox(
+            self,
+            values=self._matches(""),
+            height=36,
+            font=FONT,
+            dropdown_font=FONT,
+            state="normal",
+            border_color=LINE,
+            fg_color="white",
+            button_color=NAVY,
+            button_hover_color=TEAL_SAFE,
+            text_color="#1A1A1A",
+            command=self._picked,
+        )
+        self.combo.pack(fill="x", pady=(4, 0))
+        self.combo.set("")
+        bind_text_shortcuts(self.combo)
+        self.combo.bind("<KeyRelease>", self._typed)
+        self.combo.bind("<FocusOut>", self._leave)
+        tooltip(self, tip)
+
+    def get(self) -> str:
+        return self.combo.get().strip()
+
+    def set(self, value: str) -> None:
+        self.combo.set(value or "")
+        self.combo.configure(values=self._matches(value or ""))
+
+    def set_choices(self, values: list[str]) -> None:
+        self._all = list(values)
+        self.combo.configure(values=self._matches(self.get()))
+
+    def _matches(self, text: str) -> list[str]:
+        needle = fold_search(text)
+        if not needle:
+            return self._all[:100]
+        starts: list[str] = []
+        contains: list[str] = []
+        for item in self._all:
+            folded = fold_search(item)
+            if folded.startswith(needle):
+                starts.append(item)
+            elif needle in folded:
+                contains.append(item)
+            if len(starts) >= 40:
+                break
+        shown = starts[:40]
+        if len(shown) < 40:
+            shown.extend(contains[: 40 - len(shown)])
+        return shown
+
+    def _typed(self, event) -> None:
+        if event.keysym in {"Up", "Return", "Escape", "Tab", "Left", "Right"}:
+            return
+        self.combo.configure(values=self._matches(self.combo.get()))
+        if event.keysym == "Down":
+            try:
+                self.combo._open_dropdown_menu()
+            except Exception:
+                return
+            return "break"
+
+    def _picked(self, _value: str) -> None:
+        if self._on_commit is not None:
+            self._on_commit()
+
+    def _leave(self, _event=None) -> None:
+        if self._on_commit is not None:
+            self._on_commit()
 
 
 class LabeledCombo(ctk.CTkFrame):

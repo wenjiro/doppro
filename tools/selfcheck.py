@@ -11,6 +11,7 @@ import re
 import ssl
 import sys
 import tempfile
+from datetime import date, datetime
 from pathlib import Path
 
 sys.path.insert(0, str(Path(__file__).resolve().parent.parent))
@@ -18,11 +19,24 @@ sys.path.insert(0, str(Path(__file__).resolve().parent.parent))
 from docx import Document
 
 from core.data_model import DIRECTIONS, ProgramData
-from core.generator import anonymous_brief, equipment_brief, normalize_module_row, parse_equipment, parse_plan, parse_sections, plan_brief
+from core.generator import anonymous_brief, equipment_brief, normalize_module_row, parse_equipment, parse_plan, parse_sections, plan_brief, section_brief
+from core.generator import _holiday_prompt
+from core.holidays import holiday_dates, holiday_map, holiday_query_key, parse_holiday_answer
 from core.document_builder import build_document
-from core.planning import default_modules, study_day_loads
+from core.planning import (
+    active_holiday_extra,
+    build_calendar_rows,
+    class_placements,
+    default_modules,
+    effective_class_days,
+    lesson_dates,
+    period_bounds,
+    study_day_loads,
+    suggest_class_weeks,
+)
 from core.library import duplicate_program, export_program, import_program, list_programs, load_program, save_program
 from core.paths import project_root
+from core.places import places_for, regions, resolve_region
 from core.updates import is_newer
 from gui.onboarding import PAGES, onboarding_seen
 from core.templates_engine import build_context, profile_for
@@ -125,6 +139,7 @@ def check_direction(direction: str, folder: Path) -> None:
     assert "Цель формулирует нейросеть" in text
     assert "освоение обучающимися" not in text
     assert "TOC" in document.element.xml
+    assert "updateFields" in document.settings.element.xml
     assert "PAGE" in document.sections[0].footer._element.xml
     section_heading = next(paragraph for paragraph in document.paragraphs if paragraph.text.startswith("Раздел 1."))
     assert not section_heading.paragraph_format.page_break_before
@@ -352,6 +367,12 @@ def main() -> None:
     )
     assert "Blender" not in made_outfit["equipment"]
     assert "стол для репетиции" in made_outfit["equipment"]
+    probe.equipment = "компьютер\nпростые графические планшеты или мышки"
+    listed = build_context(probe)["material_paragraphs"]
+    assert listed[0] == "компьютер"
+    assert listed[1] == "простые графические планшеты или мышки"
+    assert "\n" not in listed[0]
+    probe.equipment = ""
     assert "хореограф" in made_outfit["professions"]
     assert "3D-моделлер" not in made_outfit["professions"]
     assert "редактор нот" in made_outfit["software"]
@@ -394,7 +415,110 @@ def main() -> None:
     assert "приветствия" in repaired["modules"][0]["basic_text"]
     assert "умножения" in repaired["modules"][0]["advanced_text"]
     assert "{" not in repaired["modules"][0]["text"]
-    probe.generated = made
+    probe.generated = {
+        **made,
+        "personal_results": ["называет, зачем ему это занятие, своими словами и без подсказки"],
+        "meta_results": ["сверяет свою работу с критерием, который педагог назвал до занятия"],
+    }
+    results_text = "\n".join(build_context(probe)["result_paragraphs"])
+    assert "своими словами" in results_text
+    assert "сверяет свою работу" in results_text
+    assert "соблюдает договорённости" not in results_text
+    card = section_brief(probe)
+    card_blob = json.dumps(card, ensure_ascii=False)
+    assert "Иванова" not in card_blob and "Дворец" not in card_blob
+    assert isinstance(card["equipment"], str)
+    assert card["modules"][0]["name"] and "lectures" in card["modules"][0]
+    bash = holiday_map(2026, "Республика Башкортостан")
+    assert bash[date(2026, 3, 20)] == "Ураза-байрам"
+    assert bash[date(2026, 5, 27)] == "Курбан-байрам"
+    assert date(2026, 10, 11) in bash and date(2026, 10, 12) in bash
+    assert date(2026, 11, 4) in bash
+    assert date(2026, 10, 11) not in holiday_map(2026, "Свердловская область")
+    asked = _holiday_prompt("Краснодарский край", 2026, 2027)
+    assert "Краснодарский край" in asked and "Иванова" not in asked and "Дворец" not in asked
+    listed = parse_holiday_answer(
+        '{"holidays":[{"date":"14.10.2026","name":"День города"},'
+        '{"date":"2026-05-09","name":"День Победы"},'
+        '{"date":"2027-03-20","name":"Ураза-байрам"},'
+        '{"date":"2026-10-11","name":"выходной за день города"}]}',
+        2026,
+        2026,
+    )
+    assert listed == [{"date": "2026-10-14", "name": "День города"}]
+    assert parse_holiday_answer('{"holidays":[]}', 2026, 2027) == []
+    city_day = holiday_map(2026, "Свердловская область", extra=listed)
+    assert city_day[date(2026, 10, 14)] == "День города"
+    assert date(2026, 11, 4) in city_day
+    sunday = holiday_map(
+        2026,
+        "Свердловская область",
+        extra=[{"date": "2026-10-11", "name": "День города"}],
+    )
+    assert sunday[date(2026, 10, 12)].startswith("выходной за")
+    probe.region = "Краснодарский край"
+    probe.year = 2026
+    probe.holiday_days = listed
+    probe.holiday_key = "другой край|2026-09-01|2027-05-31"
+    assert active_holiday_extra(probe) is None
+    start, finish = period_bounds(2026, probe.calendar_mode, probe.years)
+    probe.holiday_key = holiday_query_key(probe.region, start, finish)
+    assert active_holiday_extra(probe) == listed
+    probe.holiday_days = []
+    probe.holiday_key = ""
+    probe.region = "Свердловская область"
+    names = regions()
+    assert len(names) == 89
+    assert "Республика Башкортостан" in names and "Донецкая Народная Республика" in names
+    assert resolve_region("башкортостан") == "Республика Башкортостан"
+    assert resolve_region("Алтай") == ""
+    assert "Уфа" in places_for("Республика Башкортостан")
+    assert "Екатеринбург" in places_for("Свердловская область")
+    assert "Севастополь" in places_for("Севастополь")
+    assert places_for("мой посёлок") == []
+    weeks = suggest_class_weeks(2026, "учебный год (сентябрь–май)", 2, "Республика Башкортостан", 1)
+    picked = lesson_dates(2026, 20, 2, "учебный год (сентябрь–май)", "Республика Башкортостан", weeks, 1)
+    mondays = {date.fromisoformat(item) for item in weeks}
+    parsed_days = [datetime.strptime(item, "%d.%m.%Y").date() for item in picked]
+    assert parsed_days and len(parsed_days) <= 4
+    assert all(any(0 <= (day - monday).days <= 6 for monday in mondays) for day in parsed_days)
+    assert effective_class_days([], 2) == [0, 2]
+    assert effective_class_days([4, 0], 2) == [0, 4]
+    republic_monday = date(2026, 10, 12)
+    moved = class_placements(
+        [republic_monday],
+        {0, 2},
+        lambda day: day in holiday_dates(day.year, "Республика Башкортостан"),
+        {republic_monday.isoformat()},
+    )
+    assert republic_monday not in moved
+    assert moved[date(2026, 10, 13)] == "shift"
+    assert moved[date(2026, 10, 14)] == "plan"
+    pushed = class_placements(
+        [republic_monday],
+        {0, 1},
+        lambda day: day in holiday_dates(day.year, "Республика Башкортостан"),
+        {republic_monday.isoformat()},
+    )
+    assert pushed[date(2026, 10, 13)] == "shift"
+    assert pushed[date(2026, 10, 14)] == "shift"
+    shifted = lesson_dates(
+        2026,
+        4,
+        1,
+        "учебный год (сентябрь–май)",
+        "Республика Башкортостан",
+        ["2026-10-12"],
+        1,
+        weekdays=[0],
+    )
+    assert shifted == ["13.10.2026"]
+    assert sum(
+        int(row["hours"])
+        for row in build_calendar_rows(
+            "учебный год (сентябрь–май)", 1, 144, 2026, "Республика Башкортостан", weeks
+        )
+    ) == 144
     probe.generated = {}
 
     openings: list[str] = []

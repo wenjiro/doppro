@@ -16,6 +16,7 @@ import urllib.parse
 import urllib.request
 
 from core.data_model import ModuleItem, ProgramData
+from core.holidays import HolidayParseError, parse_holiday_answer
 from core.paths import settings_path
 from core.planning import largest_remainder
 from core.tls import app_ssl_context
@@ -131,9 +132,33 @@ def anonymous_brief(program: ProgramData) -> dict:
     }
 
 
+def section_brief(program: ProgramData) -> dict:
+    """Карточка шага сборки. Всё, что педагог уже вписал, кроме фамилии, должности и организации."""
+    brief = anonymous_brief(program)
+    brief["equipment"] = program.equipment.strip()
+    brief["consumables"] = program.consumables.strip()
+    brief["attestation_form"] = program.attestation_form.strip()
+    brief["regional_notes"] = program.regional_notes.strip()
+    brief["calendar_mode"] = program.calendar_mode
+    brief["study_weeks"] = program.study_weeks
+    brief["lessons_per_week"] = program.lessons_per_week
+    brief["class_weeks"] = len(program.class_weeks)
+    brief["modules"] = [
+        {
+            "name": item.name.strip(),
+            "theory_hours": item.theory,
+            "practice_hours": item.practice,
+            "lectures": [line.strip() for line in item.lectures if line.strip()][:8],
+            "practices": [line.strip() for line in item.practices if line.strip()][:8],
+        }
+        for item in program.modules
+    ]
+    return brief
+
+
 def generate_sections(program: ProgramData) -> dict:
     """Запрашивает тексты и возвращает словарь для ProgramData.generated."""
-    brief = anonymous_brief(program)
+    brief = section_brief(program)
     if not brief["title"] or not brief["modules"]:
         raise GenerationError("Сначала заполните название и разделы. Без них формулировать нечего.")
     payload = _complete(_prompt(brief))
@@ -149,6 +174,39 @@ def generate_plan(program: ProgramData) -> list[ModuleItem]:
     brief = plan_brief(program)
     payload = _complete(_plan_prompt(brief))
     return parse_plan(payload, program.total_hours)
+
+
+def generate_holidays(region: str, start_year: int, finish_year: int) -> list[dict[str, str]]:
+    """Просит дополнительные праздники субъекта. Фамилию, организацию и название программы не отправляет."""
+    region = region.strip()
+    if len(region) < 2:
+        raise GenerationError("Сначала укажите регион на шаге «Паспорт».")
+    if finish_year < start_year or finish_year - start_year > 6:
+        raise GenerationError("Не получилось определить годы программы. Проверьте срок и год начала.")
+    payload = _complete(_holiday_prompt(region, start_year, finish_year))
+    try:
+        return parse_holiday_answer(payload, start_year, finish_year)
+    except HolidayParseError as exc:
+        raise GenerationError(str(exc)) from exc
+
+
+def _holiday_prompt(region: str, start_year: int, finish_year: int) -> str:
+    span = str(start_year) if start_year == finish_year else f"{start_year}–{finish_year}"
+    return (
+        "Нужны дополнительные нерабочие праздничные дни субъекта Российской Федерации. "
+        f"Субъект: {region}. Годы: {span}. "
+        "Общероссийские праздники уже стоят в календаре, их не повторяй: "
+        "1–8 января, 23 февраля, 8 марта, 1 мая, 9 мая, 12 июня, 4 ноября. "
+        "Не указывай переносы выходных с субботы и воскресенья: их посчитает программа. "
+        "Нужны только дни, которые правительство этого субъекта уже установило как нерабочие "
+        "в указанные годы: день республики, день конституции субъекта и другие официальные выходные. "
+        "Религиозный праздник, в том числе Ураза-байрам и Курбан-байрам, указывай только если "
+        "на этот конкретный год правительство субъекта уже опубликовало точную дату. "
+        "Если постановления нет, день не включай и не подбирай дату по календарю соседнего года. "
+        "Если у субъекта нет своих нерабочих дней сверх общероссийских, верни пустой список. "
+        "Не пиши законы, номера постановлений, фамилии и названия организаций. "
+        'Верни только JSON: {"holidays":[{"date":"ГГГГ-ММ-ДД","name":"название дня"}]}\n'
+    )
 
 
 def generate_equipment(program: ProgramData) -> dict[str, str]:
@@ -171,6 +229,8 @@ def parse_sections(raw: str, module_count: int) -> dict:
         "tasks": _paragraphs(data.get("tasks"), 3, 6),
         "method": _one(data.get("method")),
         "subject": _paragraphs(data.get("subject"), 3, 6),
+        "personal_results": _result_lines(data.get("personal_results")),
+        "meta_results": _result_lines(data.get("meta_results")),
         "addressee": _paragraphs(data.get("addressee"), 1, 3),
         "developing": _paragraphs(data.get("developing"), 2, 5),
         "educating": _paragraphs(data.get("educating"), 2, 5),
@@ -188,8 +248,11 @@ def _prompt(brief: dict) -> str:
     return (
         "Ты составляешь фрагменты дополнительной общеобразовательной общеразвивающей программы на русском языке. "
         "Пиши просто, как методист, без канцелярита и без рекламных слов. "
-        "Текст должен быть про ЭТУ программу: опирайся на название и на названия разделов. "
-        "Не пиши общий очерк обо всей направленности, если из названия видна конкретная тема. "
+        "Текст должен быть про ЭТУ программу. Карточка — это всё, что педагог уже вписал: "
+        "название, направленность, уровень, возраст, промежутки, часы, недели, форма, "
+        "разделы с темами лекций и практик, оборудование, программы, расходные материалы, профессии и региональные заметки. "
+        "Опирайся на все эти поля, а не только на title. Не выкидывай указанный раздел и не подменяй его другой темой. "
+        "Не пиши общий очерк обо всей направленности, если из данных видна конкретная тема. "
         "Не упоминай фамилию педагога и название организации: их нет во входных данных. "
         "Не указывай номера законов, приказов, СанПиН, СП и распоряжений. "
         "Не меняй часы разделов и не придумывай даты. "
@@ -202,7 +265,9 @@ def _prompt(brief: dict) -> str:
         '"developing":["метапредметная задача","метапредметная задача"],'
         '"educating":["личностная задача","личностная задача"],'
         '"method":"как проходит занятие по этой теме",'
-        '"subject":["наблюдаемый результат","результат","результат","результат"],'
+        '"personal_results":["личностный результат пункта 1.4","результат"],'
+        '"meta_results":["метапредметный результат пункта 1.4","результат"],'
+        '"subject":["предметный результат пункта 1.4","результат","результат","результат"],'
         '"modules":[{"theory":"что объясняют, связный текст","practice":"что делают, связный текст",'
         '"form":"формы занятий через запятую","basic":"задание базового или стартового уровня",'
         '"advanced":"усложнённое задание","skills":"навыки через запятую","abilities":"умения через запятую"}],'
@@ -213,17 +278,21 @@ def _prompt(brief: dict) -> str:
         "form — формы занятий. basic — посильное задание базового или стартового уровня. "
         "advanced — усложнённое задание той же темы. skills — предметные навыки через запятую. "
         "abilities — умения вроде внимания, переключения и работы в группе, через запятую. "
-        "Пиши про тему раздела, а не общими словами направленности. "
-        "Тема всех текстов — только title. direction задаёт область, но не подменяет название. "
+        "Пиши про тему этого раздела и про то, что уже указано в его lectures и practices. "
+        "direction задаёт область, но не подменяет название и не отменяет заполненные поля. "
         "Не пиши про 3D-моделирование, Blender, аддитивные технологии и любой другой чужой пример, если этих слов нет в title. "
         "Программу заполняют разные организации и разные направленности по всей России. "
         "goal — цель именно этой программы, одно или два предложения. "
         "Начни со слов «Цель программы». Назови видимый результат по названию и разделам. "
         "Не подменяй цель общим текстом направленности и не пиши «освоение обучающимися». "
         "addressee — кому адресована программа: возраст из данных, группа, нужна ли подготовка. Не называй организацию и педагога. "
-        "tasks — 3–5 предметных задач именно по title. "
+        "tasks — 3–5 предметных задач по названию и по разделам. "
         "developing — 3–4 метапредметные задачи. educating — 3–4 личностные задачи. "
-        "Не копируй одни и те же задачи для любой направленности. "
+        "Это задачи пункта 1.2. "
+        "personal_results, meta_results и subject — пункт 1.4, планируемые результаты. "
+        "Результат — что обучающийся умеет сделать к концу срока, а не повтор формулировки задачи. "
+        "Учитывай возраст, уровень, разделы, оборудование и условия из карточки. "
+        "Не копируй одни и те же задачи и результаты для любой направленности. "
         "literature — 5–8 реальных источников по title для педагога и обучающихся. "
         "Каждую запись оформи по ГОСТ Р 7.0.100-2018 и расположи по алфавиту. "
         "Книга: Фамилия, И. О. Название : сведения / И. О. Фамилия. — Город : Издательство, год. — N с. "
@@ -728,6 +797,22 @@ def _one(value) -> str:
     if isinstance(value, list):
         value = " ".join(str(item) for item in value)
     return _clean(value or "")
+
+
+def _result_lines(value) -> list[str]:
+    if isinstance(value, str):
+        value = [value]
+    if not isinstance(value, list):
+        return []
+    items: list[str] = []
+    for item in value:
+        text = _clean(item).lstrip("—-• ").strip()
+        if len(text) < 12:
+            continue
+        items.append(text[:300])
+        if len(items) >= 8:
+            break
+    return items
 
 
 def _paragraphs(value, minimum: int, maximum: int) -> list[str]:

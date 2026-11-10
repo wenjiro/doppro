@@ -708,8 +708,16 @@ def _add_page_number(paragraph) -> None:
     field._r.append(end)
 
 
+def _enable_field_update(document: Document) -> None:
+    """Word при открытии сам собирает содержание по заголовкам."""
+    settings = document.settings.element
+    update = OxmlElement("w:updateFields")
+    update.set(qn("w:val"), "true")
+    settings.append(update)
+
+
 def _add_toc_field(paragraph) -> None:
-    """Поле автособираемого оглавления Word. Номера страниц появляются при открытии файла."""
+    """Поле оглавления. При открытии Word заменяет эту строку готовым содержанием."""
     begin_run = paragraph.add_run()
     begin = OxmlElement("w:fldChar")
     begin.set(qn("w:fldCharType"), "begin")
@@ -726,7 +734,9 @@ def _add_toc_field(paragraph) -> None:
     separate.set(qn("w:fldCharType"), "separate")
     separate_run._r.append(separate)
 
-    hint = paragraph.add_run("Оглавление соберётся по заголовкам при открытии документа в Word.")
+    hint = paragraph.add_run(
+        "Оглавление"
+    )
     hint.font.name = "Times New Roman"
     hint.font.size = Pt(12)
     hint.font.color.rgb = _rgb("000000")
@@ -735,13 +745,6 @@ def _add_toc_field(paragraph) -> None:
     end = OxmlElement("w:fldChar")
     end.set(qn("w:fldCharType"), "end")
     end_run._r.append(end)
-
-
-def _enable_field_update(document: Document) -> None:
-    settings = document.settings.element
-    node = OxmlElement("w:updateFields")
-    node.set(qn("w:val"), "true")
-    settings.append(node)
 
 
 def _set_widths(table, widths: list[float]) -> None:

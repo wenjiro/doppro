@@ -9,7 +9,7 @@ import webbrowser
 from tkinter import messagebox
 
 import customtkinter as ctk
-from PIL import Image
+from PIL import Image, ImageTk
 
 from core.data_model import ProgramData
 from core.paths import icon_path, logo_path
@@ -316,6 +316,21 @@ class DopProApp(ctk.CTk):
             return
         try:
             self.iconbitmap(str(icon))
+        except Exception:
+            pass
+        try:
+            image = Image.open(icon)
+            photos = []
+            reader = getattr(image, "ico", None)
+            sizes = image.info.get("sizes") or []
+            if reader is not None and sizes:
+                for size in sizes:
+                    photos.append(ImageTk.PhotoImage(reader.getimage(size).convert("RGBA")))
+            else:
+                photos.append(ImageTk.PhotoImage(image.convert("RGBA")))
+            if photos:
+                self._icon_photos = photos
+                self.iconphoto(True, *photos)
         except Exception:
             return
 

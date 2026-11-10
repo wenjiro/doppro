@@ -13,6 +13,14 @@ from datetime import date, timedelta
 from functools import lru_cache
 
 from core.data_model import ModuleItem
+from core.holidays import (
+    holiday_dates,
+    holiday_map,
+    holiday_query_key,
+    holidays_between,
+    region_holiday_title,
+    week_label,
+)
 from core.paths import modules_path
 
 
@@ -228,8 +236,104 @@ def calendar_months(mode: str) -> list[tuple[str, int]]:
     return list(_ACADEMIC_MONTHS)
 
 
-def build_calendar_rows(mode: str, years: int, total_hours: int) -> list[dict[str, str]]:
+def period_bounds(year: int, mode: str, years: int = 1) -> tuple[date, date]:
+    count = years if years > 0 else 1
+    if mode.startswith("лето"):
+        return date(year, 6, 1), date(year + count - 1, 8, 31)
+    if mode.startswith("календарный"):
+        return date(year, 1, 1), date(year + count - 1, 12, 31)
+    return date(year, 9, 1), date(year + count, 5, 31)
+
+
+def period_mondays(year: int, mode: str, years: int = 1) -> list[date]:
+    start, finish = period_bounds(year, mode, years)
+    monday = start - timedelta(days=start.weekday())
+    weeks: list[date] = []
+    while monday <= finish:
+        weeks.append(monday)
+        monday += timedelta(days=7)
+    return weeks
+
+
+def active_holiday_extra(program) -> list | None:
+    """Перечень модели, если он запрошен для этого региона и этого срока."""
+    days = getattr(program, "holiday_days", None)
+    key = str(getattr(program, "holiday_key", "") or "")
+    if not key or not isinstance(days, list):
+        return None
+    start, finish = period_bounds(program.year, program.calendar_mode, program.years)
+    if key != holiday_query_key(program.region, start, finish):
+        return None
+    return list(days)
+
+
+def suggest_class_weeks(
+    year: int,
+    mode: str,
+    count: int,
+    region: str = "",
+    years: int = 1,
+    extra: list | None = None,
+) -> list[str]:
+    """Первые учебные недели периода, в которых есть хотя бы один будний день без праздника."""
+    wanted = count if count > 0 else 36
+    chosen: list[str] = []
+    for monday in period_mondays(year, mode, years):
+        if _week_has_class_day(monday, region, extra):
+            chosen.append(monday.isoformat())
+        if len(chosen) >= wanted:
+            break
+    return chosen
+
+
+def class_week_rows(
+    year: int,
+    mode: str,
+    years: int,
+    region: str,
+    extra: list | None = None,
+) -> list[dict[str, str]]:
+    start, finish = period_bounds(year, mode, years)
+    rows: list[dict[str, str]] = []
+    for monday in period_mondays(year, mode, years):
+        names = []
+        for offset in range(7):
+            day = monday + timedelta(days=offset)
+            title = holiday_map(day.year, region, extra).get(day)
+            if title and start <= day <= finish:
+                names.append(f"{day.day:02d}.{day.month:02d} — {title}")
+        rows.append(
+            {
+                "monday": monday.isoformat(),
+                "label": week_label(monday),
+                "holidays": "; ".join(names),
+                "open": "1" if _week_has_class_day(monday, region, extra) else "0",
+            }
+        )
+    return rows
+
+
+def _week_has_class_day(monday: date, region: str, extra: list | None = None) -> bool:
+    for offset in range(5):
+        day = monday + timedelta(days=offset)
+        if day not in holiday_dates(day.year, region, extra):
+            return True
+    return False
+
+
+def build_calendar_rows(
+    mode: str,
+    years: int,
+    total_hours: int,
+    year: int = 0,
+    region: str = "",
+    weeks: list[str] | None = None,
+    extra: list | None = None,
+) -> list[dict[str, str]]:
     """Строки календарного учебного графика. Сумма часов равна объёму программы."""
+    custom = _calendar_from_weeks(mode, years, total_hours, year, region, weeks or [], extra)
+    if custom:
+        return custom
     months = calendar_months(mode)
     periods: list[str] = []
     weights: list[int] = []
@@ -256,58 +360,213 @@ def build_calendar_rows(mode: str, years: int, total_hours: int) -> list[dict[st
     return rows
 
 
-def lesson_dates(year: int, count: int, per_week: int, mode: str) -> list[str]:
-    """Предполагаемые даты занятий. Праздничные дни пропускаются."""
+def class_weekdays(per_week: int) -> set[int]:
+    """Дни, если педагог их ещё не выбирал: одно — понедельник, два — пн и ср, три — пн, ср и пт."""
+    count = max(1, min(int(per_week or 1), 6))
+    return set((0, 2, 4, 1, 3, 5)[:count])
+
+
+def effective_class_days(class_days: list | None, per_week: int) -> list[int]:
+    """Дни, которые отметил педагог. Пустой список — прежняя схема по числу занятий."""
+    found: list[int] = []
+    for item in class_days or []:
+        try:
+            day = int(item)
+        except (TypeError, ValueError):
+            continue
+        if 0 <= day <= 6 and day not in found:
+            found.append(day)
+    if found:
+        return sorted(found)
+    return sorted(class_weekdays(per_week))
+
+
+def class_placements(
+    mondays: list[date],
+    weekdays: set[int],
+    is_holiday,
+    selected: set[str] | None = None,
+) -> dict[date, str]:
+    """Каждое занятие выбранных дней. Праздник или занятый день переносит его вперёд.
+
+    Сначала ищется день той же недели, затем день следующей отмеченной учебной недели.
+    «plan» — занятие в свой день, «shift» — перенос.
+    """
+    taken: dict[date, str] = {}
+    chosen = {int(day) for day in weekdays if 0 <= int(day) <= 6}
+    selected_weeks = set(selected) if selected is not None else None
+
+    def free(day: date, origin: date) -> bool:
+        if day in taken or is_holiday(day):
+            return False
+        week = day - timedelta(days=day.weekday())
+        if week == origin:
+            return True
+        if selected_weeks is None:
+            return True
+        return week.isoformat() in selected_weeks
+
+    for monday in sorted(mondays):
+        if selected_weeks is not None and monday.isoformat() not in selected_weeks:
+            continue
+        for offset in sorted(chosen):
+            planned = monday + timedelta(days=offset)
+            slot = planned if free(planned, monday) else None
+            if slot is None:
+                cursor = planned + timedelta(days=1)
+                for _ in range(60):
+                    if free(cursor, monday):
+                        slot = cursor
+                        break
+                    cursor += timedelta(days=1)
+            if slot is None:
+                continue
+            taken[slot] = "plan" if slot == planned else "shift"
+    return taken
+
+
+def lesson_dates(
+    year: int,
+    count: int,
+    per_week: int,
+    mode: str,
+    region: str = "",
+    weeks: list[str] | None = None,
+    years: int = 1,
+    extra: list | None = None,
+    weekdays: list[int] | None = None,
+) -> list[str]:
+    """Предполагаемые даты занятий. Праздник переносит занятие, а не отменяет его."""
     if count <= 0:
         return []
-    per_week = max(1, min(int(per_week or 1), 6))
-    weekdays = set((0, 2, 4, 1, 3, 5)[:per_week])
-    if mode.startswith("лето"):
-        start = date(year, 6, 1)
-    elif mode.startswith("календарный"):
-        start = date(year, 1, 8)
-    else:
-        # 1–7 сентября в образце оставлены на комплектование.
+    chosen = effective_class_days(weekdays, per_week)
+    start, finish = period_bounds(year, mode, years)
+    if not weeks and not mode.startswith("лето") and not mode.startswith("календарный"):
         start = date(year, 9, 8)
-    holidays = _holidays(year)
-    found: list[str] = []
-    day = start
-    limit = date(year + 3, 1, 1)
-    while len(found) < count and day < limit:
-        if day.weekday() in weekdays and day not in holidays:
-            found.append(day.strftime("%d.%m.%Y"))
-        day += timedelta(days=1)
-    return found
+    elif not weeks and mode.startswith("календарный"):
+        start = date(year, 1, 8)
+    mondays: list[date] = []
+    if weeks:
+        for item in weeks:
+            try:
+                mondays.append(date.fromisoformat(item))
+            except ValueError:
+                continue
+    else:
+        mondays = [
+            monday
+            for monday in period_mondays(year, mode, years)
+            if monday + timedelta(days=6) >= start and monday <= finish
+        ]
+    selected = {monday.isoformat() for monday in mondays}
+
+    def is_holiday(day: date) -> bool:
+        return day in holiday_dates(day.year, region, extra)
+
+    placed = class_placements(mondays, set(chosen), is_holiday, selected)
+    found = [day.strftime("%d.%m.%Y") for day in sorted(placed) if start <= day <= finish]
+    return found[:count]
 
 
-def holiday_note(year: int, mode: str) -> str:
-    if mode.startswith("лето"):
-        return "В летнем режиме занятия ставятся в июне–августе, кроме 12 июня, если этот день попадает на занятие."
-    if mode.startswith("календарный"):
-        return (
-            f"В {year} году занятия не ставятся на нерабочие праздничные дни: "
-            "1–8 января, 23 февраля, 8 марта, 1 и 9 мая, 12 июня, 4 ноября."
-        )
+def holiday_note(year: int, mode: str, region: str = "", years: int = 1, extra: list | None = None) -> str:
+    start, finish = period_bounds(year, mode, years)
+    found = holidays_between(start, finish, region, extra)
+    shown = [f"{day.strftime('%d.%m.%Y')} — {name}" for day, name in found[:12]]
+    if len(found) > 12:
+        shown.append(f"ещё {len(found) - 12}")
+    title = region_holiday_title(region)
+    if extra is not None:
+        scope = f"Учтены нерабочие дни России и {title}." if title else "Учтены нерабочие дни России."
+        if extra:
+            scope += " Дополнительные даты региона взяты у модели."
+        else:
+            scope += " Модель не добавила других праздников региона."
+    elif title:
+        scope = f"Учтены нерабочие дни России и {title}."
+    else:
+        scope = "Учтены нерабочие дни России. Для этого региона отдельный перечень праздников не подключён."
+    listing = "; ".join(shown)
+    tail = ""
+    if extra is None and region_code_missing_religious(region, start.year, finish.year):
+        tail = " Даты Ураза-байрам и Курбан-байрам на часть лет ещё не объявлены, их в сетку не ставили."
     return (
-        f"Учебный год {year}–{year + 1}: занятия не ставятся на нерабочие праздничные дни "
-        "(4 ноября, 1–8 января, 23 февраля, 8 марта, 1 и 9 мая). "
-        "1–7 сентября оставлены на комплектование групп, занятия в расчёте начинаются с 8 сентября."
+        f"{scope} В отмеченные недели занятия не ставятся в эти дни: {listing}. "
+        "Если праздник попал на субботу или воскресенье, следующий рабочий день тоже выходной. "
+        f"Перенос по отдельному постановлению Правительства на год можно убрать, сняв неделю.{tail}"
     )
 
 
-def _holidays(year: int) -> set[date]:
-    days: set[date] = set()
-    for value in (year, year + 1):
-        for day_number in range(1, 9):
-            days.add(date(value, 1, day_number))
-        days.update(
-            {
-                date(value, 2, 23),
-                date(value, 3, 8),
-                date(value, 5, 1),
-                date(value, 5, 9),
-                date(value, 6, 12),
-                date(value, 11, 4),
-            }
-        )
-    return days
+def region_code_missing_religious(region: str, start_year: int, finish_year: int) -> bool:
+    from core.holidays import region_code
+
+    if region_code(region) not in {"bashkortostan", "tatarstan"}:
+        return False
+    return any(value not in _URAZA_YEARS for value in range(start_year, finish_year + 1))
+
+
+_URAZA_YEARS = {2024, 2025, 2026}
+
+
+def _calendar_from_weeks(
+    mode: str,
+    years: int,
+    total_hours: int,
+    year: int,
+    region: str,
+    weeks: list[str],
+    extra: list | None = None,
+) -> list[dict[str, str]]:
+    if not weeks or year <= 0 or total_hours <= 0:
+        return []
+    start, finish = period_bounds(year, mode, years)
+    counts: dict[str, int] = {}
+    for item in sorted(weeks):
+        try:
+            monday = date.fromisoformat(item)
+        except ValueError:
+            continue
+        for offset in range(5):
+            day = monday + timedelta(days=offset)
+            if day < start or day > finish or day in holiday_dates(day.year, region, extra):
+                continue
+            label = _month_label(day, year, years)
+            counts[label] = counts.get(label, 0) + 1
+    if not counts:
+        return []
+    periods = list(counts)
+    hours = largest_remainder(total_hours, list(counts.values()))
+    rows: list[dict[str, str]] = []
+    last = len(periods) - 1
+    for index, (period, section_hours) in enumerate(zip(periods, hours)):
+        note = "учебные занятия в отмеченные недели"
+        if index == 0:
+            note = "старт программы, входная диагностика"
+        elif index == last:
+            note = "завершение программы, итоговая аттестация"
+        rows.append({"period": period, "hours": str(section_hours), "note": note})
+    return rows
+
+
+_MONTH_NAME = (
+    "январь",
+    "февраль",
+    "март",
+    "апрель",
+    "май",
+    "июнь",
+    "июль",
+    "август",
+    "сентябрь",
+    "октябрь",
+    "ноябрь",
+    "декабрь",
+)
+
+
+def _month_label(day: date, start_year: int, years: int) -> str:
+    name = _MONTH_NAME[day.month - 1].capitalize()
+    if years <= 1:
+        return name
+    index = day.year - start_year + 1 if day.month >= 9 else day.year - start_year
+    index = max(1, index)
+    return f"{index}-й год — {name}"
