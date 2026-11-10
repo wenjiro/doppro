@@ -1,0 +1,5 @@
+customtkinter>=5.2.2
+docxtpl>=0.16.7
+python-docx>=1.1.0
+Pillow>=10.0.0
+pyinstaller>=6.3.0
