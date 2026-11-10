@@ -11,6 +11,7 @@ import json
 from functools import lru_cache
 
 from core.data_model import LEVEL_FULL, LEVEL_METHOD, ProgramData
+from core.generator import normalize_module_row
 from core.paths import text_blocks_dir
 from core.planning import (
     build_calendar_rows,
@@ -18,7 +19,6 @@ from core.planning import (
     holiday_note,
     hours_word,
     lesson_dates,
-    lessons_word,
     study_day_loads,
     years_word,
 )
@@ -76,22 +76,67 @@ def _band_label(age_from: int, age_to: int) -> str:
     return f"{age_from}\u2013{age_to} лет"
 
 
-def age_bands(program: ProgramData) -> list[dict[str, str]]:
-    """Линии 11–13 и 14–17 внутри реального возраста программы."""
-    if not program.differentiate:
-        return [{"kind": "common", "label": _band_label(program.age_from, program.age_to)}]
+_EXPLAIN = {
+    "young": "коротко, с показом и образцом",
+    "middle": "показ, затем разбор одного шага своими словами",
+    "old": "с разбором шагов, ошибок и причин",
+    "common": "показ и образец, мера помощи — по ходу занятия",
+}
+_INDEPENDENCE = {
+    "young": "пошаговая инструкция, частая проверка",
+    "middle": "инструкция на часть работы, свой выбор в оставшейся",
+    "old": "свой план и правка до показа",
+    "common": "помощь уменьшается, когда шаг уже получается",
+}
+
+
+def _span_tone(index: int, count: int, differentiate: bool) -> str:
+    if not differentiate or count <= 1:
+        return "common"
+    if index == 0:
+        return "young"
+    if index == count - 1:
+        return "old"
+    return "middle"
+
+
+def age_bands(program: ProgramData, profile: dict | None = None) -> list[dict[str, str]]:
+    """Линии по промежуткам, которые задал педагог. Без галочки — один промежуток на весь возраст."""
+    spans = program.effective_age_spans()
+    if not spans:
+        spans = [{"from": program.age_from, "to": program.age_to}]
+    count = len(spans)
     bands: list[dict[str, str]] = []
-    if program.age_from <= 13:
-        upper = min(program.age_to, 13)
-        if program.age_from <= upper:
-            bands.append({"kind": "junior", "label": _band_label(program.age_from, upper)})
-    if program.age_to >= 14:
-        lower = max(program.age_from, 14)
-        if lower <= program.age_to:
-            bands.append({"kind": "senior", "label": _band_label(lower, program.age_to)})
-    if not bands:
-        return [{"kind": "common", "label": _band_label(program.age_from, program.age_to)}]
+    for index, span in enumerate(spans):
+        tone = _span_tone(index, count, program.differentiate)
+        junior = (profile or {}).get("junior", "работа по образцу")
+        senior = (profile or {}).get("senior", "больше самостоятельности")
+        if tone == "young":
+            support = junior
+        elif tone == "old":
+            support = senior
+        elif tone == "middle":
+            support = "часть работы по образцу и показу, часть — своим планом"
+        else:
+            support = f"сначала {junior}; когда шаг получается — {senior}"
+        bands.append(
+            {
+                "kind": tone,
+                "tone": tone,
+                "label": _band_label(int(span["from"]), int(span["to"])),
+                "support": support,
+                "explain": _EXPLAIN[tone],
+                "independence": _INDEPENDENCE[tone],
+                "product": support,
+            }
+        )
     return bands
+
+
+def _join_labels(labels: list[str]) -> str:
+    if len(labels) <= 1:
+        return labels[0] if labels else ""
+    return ", ".join(labels[:-1]) + " и " + labels[-1]
 
 
 def _base_mapping(program: ProgramData, profile: dict, practice_percent: int) -> dict[str, str]:
@@ -159,30 +204,28 @@ def _options_paragraph(program: ProgramData, phrases: dict, mapping: dict) -> st
 
 
 def _differentiation_paragraph(program: ProgramData, phrases: dict, mapping: dict, bands: list[dict[str, str]]) -> str:
-    if not program.differentiate:
+    if not program.differentiate or len(bands) < 2:
         return fmt(phrases["diff_off"], mapping)
-    kinds = {band["kind"] for band in bands}
-    enriched = dict(mapping)
-    if "junior" in kinds and "senior" in kinds:
-        enriched["junior_label"] = next(band["label"] for band in bands if band["kind"] == "junior")
-        enriched["senior_label"] = next(band["label"] for band in bands if band["kind"] == "senior")
-        text = fmt(phrases["diff_both"], enriched)
-        return text + " " + phrases["diff_note"]
-    if "junior" in kinds:
-        return fmt(phrases["diff_junior_only"], mapping)
-    if "senior" in kinds:
-        return fmt(phrases["diff_senior_only"], mapping)
-    return fmt(phrases["diff_off"], mapping)
+    supports = " ".join(f"Для {band['label']} опора — {band['support']}." for band in bands)
+    return (
+        f"В программе выделены возрастные промежутки: {_join_labels([band['label'] for band in bands])}. "
+        "Цель одна. Меняются длина объяснения, самостоятельность и сложность продукта. "
+        + supports
+    )
 
 
-def _trials_paragraph(program: ProgramData, phrases: dict, mapping: dict) -> str | None:
+def _trials_paragraph(program: ProgramData, phrases: dict, mapping: dict, bands: list[dict[str, str]]) -> str | None:
     if not program.professional_trials:
         return None
-    if program.age_to < 14:
+    if len(bands) < 2:
         return fmt(phrases["trials_young"], mapping)
-    if program.age_from >= 14:
-        return fmt(phrases["trials_senior"], mapping)
-    return fmt(phrases["trials_mixed"], mapping)
+    younger = _join_labels([band["label"] for band in bands[:-1]])
+    oldest = bands[-1]["label"]
+    return (
+        f"Для обучающихся {younger} проба ознакомительная: один понятный шаг вместе с педагогом. "
+        f"Для {oldest} проба ближе к роли: короткое задание и разбор нужных умений. "
+        "Это знакомство с делом, а не профессиональное обучение."
+    )
 
 
 def _regional_paragraph(program: ProgramData, phrases: dict, mapping: dict) -> str:
@@ -293,42 +336,6 @@ def _task_pair(role: str) -> tuple[str, str]:
     return pairs.get(role, pairs["practice"])
 
 
-def _module_hours_sentence(module_name: str, theory: int, practice: int) -> str:
-    total = theory + practice
-    bits: list[str] = []
-    if theory:
-        bits.append(f"теория — {theory} {hours_word(theory)}")
-    if practice:
-        bits.append(f"практика — {practice} {hours_word(practice)}")
-    sentence = f"Раздел «{module_name}» рассчитан на {total} {hours_word(total)}"
-    if bits:
-        sentence += " (" + ", ".join(bits) + ")."
-    else:
-        sentence += "."
-    return sentence
-
-
-def _topics_line(days: list[dict[str, str]]) -> str:
-    lectures = [day["lecture"] for day in days if day["lecture"] != "—"]
-    practices = [day["practice"] for day in days if day["practice"] != "—"]
-
-    def brief(items: list[str]) -> str:
-        if not items:
-            return "—"
-        shown = "; ".join(items[:4])
-        rest = len(items) - 4
-        if rest > 0:
-            shown += f"; ещё {rest}"
-        return shown
-
-    count = len(days)
-    return (
-        f"По учебным дням: {count} {lessons_word(count)}. "
-        f"Темы лекций: {brief(lectures)}. Темы практик: {brief(practices)}. "
-        "Полная раскладка каждого дня — в календарно-тематическом плане."
-    )
-
-
 def _short_title(title: str, limit: int = 70) -> str:
     compact = " ".join(title.split())
     if len(compact) <= limit:
@@ -346,7 +353,7 @@ def build_context(program: ProgramData) -> dict:
     base_total = module_sum or program.total_hours or 1
     practice_percent = round(practice_sum * 100 / base_total) if base_total else 0
     mapping = _base_mapping(program, profile, practice_percent)
-    bands = age_bands(program)
+    bands = age_bands(program, profile)
 
     roles = [detect_role(item.name) for item in program.modules]
     roles_present = set(roles)
@@ -396,7 +403,7 @@ def build_context(program: ProgramData) -> dict:
     )
     if "дистанц" in program.study_form:
         features.append(fmt(phrases["features_distance"], mapping))
-    trials_text = _trials_paragraph(program, phrases, mapping)
+    trials_text = _trials_paragraph(program, phrases, mapping, bands)
     if trials_text:
         features.append(trials_text)
 
@@ -405,11 +412,9 @@ def build_context(program: ProgramData) -> dict:
     else:
         teaching = [fmt(item, mapping) for item in voice["tasks"]]
         teaching.extend(fmt(item, mapping) for item in phrases["tasks_teaching"])
-    kinds = {band["kind"] for band in bands}
-    if program.differentiate and "junior" in kinds:
-        teaching.append(fmt(phrases["task_junior"], mapping))
-    if program.differentiate and "senior" in kinds:
-        teaching.append(fmt(phrases["task_senior"], mapping))
+    if program.differentiate and len(bands) >= 2:
+        pieces = "; ".join(f"для {band['label']} — {band['support']}" for band in bands)
+        teaching.append(f"Учитывать возрастные промежутки программы: {pieces}.")
     if program.professional_trials:
         teaching.append(fmt(phrases["task_trials"], mapping))
     if program.regional_project:
@@ -485,35 +490,43 @@ def build_context(program: ProgramData) -> dict:
             extra += " В этот же раздел входит региональный мини-проект."
         mandatory, enrichment = _task_pair(role)
         custom = _module_speech(spoken, index)
-        theory_text = custom.get("theory") or f"Теория ({module.theory} {hours_word(module.theory)}). {blurb}"
-        practice_text = custom.get("practice") or (
-            f"Практика ({module.practice} {hours_word(module.practice)}). "
-            f"Обучающиеся выполняют работу {mapping['level_method']}.{extra}"
+        name = module.name.strip()
+        easy_label = "Задание стартового уровня" if program.level == "стартовый" else "Задание базового уровня"
+        theory_text = _labeled("Теория", custom.get("theory") or blurb)
+        practice_text = _labeled(
+            "Практика",
+            custom.get("practice") or f"Обучающиеся выполняют работу {mapping['level_method']}.{extra}",
         )
-        tasks_text = custom.get("tasks") or (
-            f"Обязательное задание: {mandatory} "
-            f"Задание с элементами усложнения: {enrichment}"
+        form_body = (custom.get("form") or lesson_form).rstrip(".")
+        if "контрол" not in form_body.casefold():
+            form_body = f"{form_body}. Форма контроля — {control}"
+        form_text = _labeled("Форма занятий", form_body)
+        basic_text = _labeled(easy_label, custom.get("basic") or mandatory)
+        advanced_text = _labeled("Усложнённое задание", custom.get("advanced") or enrichment)
+        skills_text = _labeled("Навыки", custom.get("skills") or f"{profile['skills']} по теме «{name}»")
+        abilities_text = _labeled(
+            "Умения",
+            custom.get("abilities")
+            or "концентрация внимания на шаге задания, переключение с объяснения на практику, работа в паре или в группе",
         )
-        control_text = f"Формы занятий: {lesson_form}. Форма контроля: {control}."
-        description = (
-            f"{_module_hours_sentence(module.name.strip(), module.theory, module.practice)} "
-            f"{theory_text} {practice_text} {tasks_text} {control_text}"
-        )
+        lines = [theory_text, practice_text, form_text, basic_text, advanced_text, skills_text, abilities_text]
         module_views.append(
             {
                 "num": str(index + 1),
-                "name": module.name.strip(),
+                "name": name,
                 "theory": str(module.theory),
                 "practice": str(module.practice),
                 "hours": str(module.hours),
                 "control": control,
-                "heading": f"Раздел {index + 1}. {module.name.strip()} ({module.hours} {hours_word(module.hours)})",
-                "text": description,
+                "heading": f"Раздел {index + 1}. «{name.strip('«»')}» ({module.hours} {hours_word(module.hours)})",
+                "text": " ".join(lines),
                 "theory_text": theory_text,
                 "practice_text": practice_text,
-                "tasks_text": tasks_text,
-                "control_text": control_text,
-                "topics_line": _topics_line(day_rows) if day_rows else "",
+                "form_text": form_text,
+                "basic_text": basic_text,
+                "advanced_text": advanced_text,
+                "skills_text": skills_text,
+                "abilities_text": abilities_text,
             }
         )
 
@@ -528,12 +541,15 @@ def build_context(program: ProgramData) -> dict:
         results.append(f"Предметные результаты для обучающихся {band['label']}:")
         pool = list(spoken.get("subject") or [fmt(item, mapping) for item in voice["subject"]])
         pool.extend(phrases["subject_common"])
-        if band["kind"] == "junior":
+        if band["tone"] == "young":
             pool.extend(phrases["subject_junior"])
             support = phrases["subject_support_junior"]
-        elif band["kind"] == "senior":
+        elif band["tone"] == "old":
             pool.extend(phrases["subject_senior"])
             support = phrases["subject_support_senior"]
+        elif band["tone"] == "middle":
+            pool.extend(phrases["subject_middle"])
+            support = phrases["subject_support_middle"]
         else:
             support = phrases["subject_support_common"]
         results.extend(f"— {_show(item, mapping)}" for item in pool)
@@ -592,7 +608,9 @@ def build_context(program: ProgramData) -> dict:
 
     bullet = lambda lines: [f"— {line}" if not line.startswith("—") else line for line in lines]
     normative_items = _normative_items(program, mapping)
-    distinctive_items = _distinctive_items(program, mapping, practice_percent, voice, spoken.get("distinctive"))
+    distinctive_items = _distinctive_items(
+        program, mapping, practice_percent, voice, spoken.get("distinctive"), bands
+    )
     level_paragraphs = [
         (
             f"Программа реализуется на {mapping['level_full']} уровне. "
@@ -603,30 +621,12 @@ def build_context(program: ProgramData) -> dict:
     direction_paragraphs = [f"Программа имеет {program.direction} направленность."]
     age_rows = [
         {
-            "parameter": "Как объясняет педагог",
-            "junior": "коротко, с показом и образцом",
-            "senior": "с разбором шагов, ошибок и причин",
-        },
-        {
-            "parameter": "Самостоятельность",
-            "junior": "пошаговая инструкция, частая проверка",
-            "senior": "свой план и правка до показа",
-        },
-        {
-            "parameter": "Продукт",
-            "junior": profile["junior"],
-            "senior": profile["senior"],
-        },
-        {
-            "parameter": "Представление результата",
-            "junior": "3–5 минут: что сделано и что получилось",
-            "senior": "5–7 минут: идея, этапы, результат, что улучшить",
-        },
-        {
-            "parameter": "Профессиональная проба",
-            "junior": "один ознакомительный шаг вместе с педагогом",
-            "senior": "задание в роли специалиста и короткий разбор",
-        },
+            "label": band["label"],
+            "explain": band["explain"],
+            "independence": band["independence"],
+            "product": band["product"],
+        }
+        for band in bands
     ]
     link_rows = []
     for task, tool in zip(teaching[:4], ("наблюдение и стартовое задание", "практическая работа", "представление результата", "беседа и мини-проект")):
@@ -674,7 +674,11 @@ def build_context(program: ProgramData) -> dict:
     preview = [
         f"Название: {mapping['title']}",
         f"Направленность: {program.direction}. Уровень: {mapping['level_full']}.",
-        f"Возраст: {mapping['age_text']}. Дифференциация 11–13 и 14–17: {'включена' if program.differentiate else 'выключена'}.",
+        (
+            f"Возраст: {mapping['age_text']}. Промежутки: "
+            + (", ".join(band["label"] for band in bands) if program.differentiate and len(bands) >= 2 else "без деления")
+            + "."
+        ),
         f"Срок: {mapping['years_text']}. Объём: {program.total_hours} {mapping['hours_word']}. В неделю: {program.hours_per_week}.",
         f"Группа: {mapping['group_text']}. Форма: {program.study_form}.",
         f"Организация: {mapping['organization']}.",
@@ -853,12 +857,18 @@ def _module_speech(spoken: dict, index: int) -> dict[str, str]:
     rows = spoken.get("modules")
     if not isinstance(rows, list) or index >= len(rows) or not isinstance(rows[index], dict):
         return {}
-    row = rows[index]
-    return {
-        key: str(row.get(key) or "").strip()
-        for key in ("theory", "practice", "tasks")
-        if str(row.get(key) or "").strip()
-    }
+    return normalize_module_row(rows[index])
+
+
+def _labeled(label: str, text: str) -> str:
+    body = " ".join(str(text or "").split()).strip()
+    if not body:
+        return ""
+    if body[-1] not in ".!?":
+        body += "."
+    if body.casefold().startswith(label.casefold()):
+        return body
+    return f"{label}: {body}"
 
 
 def _distinctive_items(
@@ -867,8 +877,12 @@ def _distinctive_items(
     practice_percent: int,
     voice: dict,
     custom: list[str] | None,
+    bands: list[dict[str, str]] | None = None,
 ) -> list[str]:
     items = list(custom) if custom else [fmt(item, mapping) for item in voice["distinctive"]]
+    if program.differentiate and bands and len(bands) >= 2:
+        pieces = "; ".join(f"для {band['label']} — {band['support']}" for band in bands)
+        items.append(f"Возрастные промежутки этой программы: {pieces}.")
     items.append(f"Практическая доля — около {practice_percent} % часов.")
     items.append("У каждого раздела есть теория, практика, обязательное задание, задание с усложнением и форма контроля.")
     if program.professional_trials:

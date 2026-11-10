@@ -11,7 +11,7 @@ from __future__ import annotations
 import sys
 from pathlib import Path
 
-VERSION = "1.0.0"
+VERSION = "1.1.0"
 APP_NAME = "ДопПро"
 GITHUB_REPO = "wenjiro/doppro"
 GITHUB_RELEASES = "https://github.com/wenjiro/doppro/releases"

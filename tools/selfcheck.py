@@ -18,7 +18,7 @@ sys.path.insert(0, str(Path(__file__).resolve().parent.parent))
 from docx import Document
 
 from core.data_model import DIRECTIONS, ProgramData
-from core.generator import anonymous_brief, equipment_brief, parse_equipment, parse_plan, parse_sections, plan_brief
+from core.generator import anonymous_brief, equipment_brief, normalize_module_row, parse_equipment, parse_plan, parse_sections, plan_brief
 from core.document_builder import build_document
 from core.planning import default_modules, study_day_loads
 from core.library import duplicate_program, export_program, import_program, list_programs, load_program, save_program
@@ -126,6 +126,12 @@ def check_direction(direction: str, folder: Path) -> None:
     assert "освоение обучающимися" not in text
     assert "TOC" in document.element.xml
     assert "PAGE" in document.sections[0].footer._element.xml
+    section_heading = next(paragraph for paragraph in document.paragraphs if paragraph.text.startswith("Раздел 1."))
+    assert not section_heading.paragraph_format.page_break_before
+    assert "«" in section_heading.text
+    joined = "\n".join(paragraph.text for paragraph in document.paragraphs)
+    assert "Теория:" in joined and "Практика:" in joined and "Форма занятий:" in joined
+    assert "Усложнённое задание:" in joined and "Навыки:" in joined and "Умения:" in joined
 
     curriculum = _table_with(document, "Раздел / тема")
     body_hours = 0
@@ -192,6 +198,21 @@ def main() -> None:
     brief_blob = json.dumps(anonymous_brief(probe), ensure_ascii=False)
     assert "Иванова" not in brief_blob
     assert "Дворец" not in brief_blob
+    assert anonymous_brief(probe)["age_spans"] == ["11–13", "14–17"]
+    custom = _sample("художественная")
+    custom.age_from = 6
+    custom.age_to = 12
+    custom.age_spans = [{"from": 6, "to": 8}, {"from": 9, "to": 10}, {"from": 11, "to": 12}]
+    assert not custom.errors_learners(), custom.errors_learners()
+    custom_context = build_context(custom)
+    assert [row["label"] for row in custom_context["age_rows"]] == ["6–8 лет", "9–10 лет", "11–12 лет"]
+    custom_text = "\n".join(custom_context["addressee_paragraphs"] + custom_context["distinctive_items"])
+    assert "6–8" in custom_text and "9–10" in custom_text and "11–12" in custom_text
+    assert "11–13" not in custom_text and "14–17" not in custom_text
+    assert anonymous_brief(custom)["age_spans"] == ["6–8", "9–10", "11–12"]
+    overlap = _sample("техническая")
+    overlap.age_spans = [{"from": 11, "to": 14}, {"from": 14, "to": 17}]
+    assert any("пересек" in item for item in overlap.errors_learners())
     made = parse_sections(
         json.dumps(
             {
@@ -337,6 +358,43 @@ def main() -> None:
     assert "ткань для костюма" in made_outfit["consumables"]
     assert "3D-печати" not in made_outfit["consumables"]
     assert spoken["modules"][0]["theory_text"].startswith("Теория вводного")
+    assert "Теория:" in spoken["modules"][1]["theory_text"] or spoken["modules"][1]["theory_text"].startswith("Теория")
+    assert "Практика:" in spoken["modules"][0]["practice_text"] or spoken["modules"][0]["practice_text"].startswith("Практика")
+    assert "Форма занятий:" in spoken["modules"][0]["form_text"]
+    assert "Навыки:" in spoken["modules"][0]["skills_text"]
+    assert "Умения:" in spoken["modules"][0]["abilities_text"]
+    dumped = normalize_module_row(
+        {
+            "theory": "Нумерация чисел от 1 до 100 и состав числа.",
+            "practice": "Устный счёт в игровой форме и решение задач.",
+            "form": "игра и учебное занятие",
+            "tasks": {
+                "обязательное задание": "составить простую программу приветствия",
+                "задание с усложнением": "создать программу вывода таблицы умножения",
+            },
+            "skills": "устный счёт в пределах 20, понимание состава числа",
+            "abilities": "концентрация внимания, работа в команде",
+        }
+    )
+    assert "приветствия" in dumped["basic"]
+    assert "умножения" in dumped["advanced"]
+    assert "{" not in dumped["basic"]
+    probe.generated = {
+        **made,
+        "modules": [
+            {
+                "theory": made["modules"][0]["theory"],
+                "practice": made["modules"][0]["practice"],
+                "tasks": "{'обязательное задание': 'составить простую программу приветствия', 'задание с усложнением': 'создать программу вывода таблицы умножения'}",
+            },
+            *made["modules"][1:],
+        ],
+    }
+    repaired = build_context(probe)
+    assert "приветствия" in repaired["modules"][0]["basic_text"]
+    assert "умножения" in repaired["modules"][0]["advanced_text"]
+    assert "{" not in repaired["modules"][0]["text"]
+    probe.generated = made
     probe.generated = {}
 
     openings: list[str] = []

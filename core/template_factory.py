@@ -284,12 +284,14 @@ def _add_complex_main(document: Document) -> None:
         after=6,
         line=1.0,
     )
-    module_heading.paragraph_format.page_break_before = True
+    module_heading.paragraph_format.space_before = Pt(12)
     _body(document, "{{ m.theory_text }}")
     _body(document, "{{ m.practice_text }}")
-    _body(document, "{{ m.tasks_text }}")
-    _body(document, "{{ m.control_text }}")
-    _body_small(document, "{{ m.topics_line }}")
+    _body(document, "{{ m.form_text }}")
+    _body(document, "{{ m.basic_text }}")
+    _body(document, "{{ m.advanced_text }}")
+    _body(document, "{{ m.skills_text }}")
+    _body(document, "{{ m.abilities_text }}")
     _tag(document, "{%p endfor %}")
 
     _heading2(document, "1.4. Планируемые результаты")
@@ -303,13 +305,13 @@ def _add_complex_main(document: Document) -> None:
         cells=["{{ link.task }}", "{{ link.result }}", "{{ link.tool }}"],
         centers=set(),
     )
-    _label(document, "Различия по возрасту при одних результатах")
+    _label(document, "Как строится задание по возрастным промежуткам")
     _table(
         document,
-        headers=["Параметр", "11–13 лет", "14–17 лет"],
-        widths=[4.0, 6.2, 6.3],
+        headers=["Промежуток", "Как объясняет педагог", "Самостоятельность", "Продукт"],
+        widths=[3.2, 4.4, 4.5, 4.4],
         loop="age in age_rows",
-        cells=["{{ age.parameter }}", "{{ age.junior }}", "{{ age.senior }}"],
+        cells=["{{ age.label }}", "{{ age.explain }}", "{{ age.independence }}", "{{ age.product }}"],
         centers=set(),
     )
 

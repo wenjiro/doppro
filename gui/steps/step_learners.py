@@ -5,10 +5,21 @@ from __future__ import annotations
 
 import customtkinter as ctk
 
-from core.data_model import CALENDAR_MODES, STUDY_FORMS
-from gui.theme import FONT_S, MUTED
+from core.data_model import CALENDAR_MODES, STUDY_FORMS, suggest_age_spans
+from gui.theme import FONT, FONT_S, LINE, MUTED, NAVY
 from gui.tooltip import tooltip
-from gui.widgets import LabeledCombo, LabeledEntry, caption, card, checkbox, hint, parse_int, set_checkbox
+from gui.widgets import (
+    LabeledCombo,
+    LabeledEntry,
+    bind_text_shortcuts,
+    caption,
+    card,
+    checkbox,
+    hint,
+    parse_int,
+    secondary_button,
+    set_checkbox,
+)
 
 
 class StepLearners(ctk.CTkScrollableFrame):
@@ -18,8 +29,8 @@ class StepLearners(ctk.CTkScrollableFrame):
         caption(self, "Обучающиеся, срок и объём")
         hint(
             self,
-            "Дифференциация делит содержание на две линии: 11–13 лет и 14–17 лет. "
-            "В документ попадут только те границы, которые входят в указанный возраст.",
+            "Дифференциация идёт по вашим промежуткам внутри «возраст от — до», а не по готовым 11–13 и 14–17. "
+            "Каждый промежуток попадёт в документ отдельной строкой.",
         )
 
         body = card(self)
@@ -66,11 +77,48 @@ class StepLearners(ctk.CTkScrollableFrame):
         self.calendar = LabeledCombo(body, "Календарный график", CALENDAR_MODES, required=True)
         self.calendar.grid(row=7, column=0, columnspan=2, sticky="ew", pady=(0, 8))
 
-        self.differentiate = checkbox(body, "Дифференцировать задания для 11–13 и 14–17 лет")
+        self.differentiate = checkbox(body, "Дифференцировать задания по возрастным промежуткам")
         self.differentiate.grid(row=8, column=0, columnspan=2, sticky="w", pady=(4, 0))
-        tooltip(self.differentiate, "В документ попадут только те возрастные линии, которые входят в указанный возраст.")
+        self.differentiate.configure(command=self._toggle_spans)
+        tooltip(
+            self.differentiate,
+            "Промежутки задаёте сами. В таблицу и в текст попадут именно они, от младшего к старшему.",
+        )
+
+        self.spans_box = ctk.CTkFrame(body, fg_color="white")
+        self.spans_box.grid(row=9, column=0, columnspan=2, sticky="ew", pady=(8, 0))
+        self.spans_box.grid_columnconfigure(0, weight=1)
+        ctk.CTkLabel(
+            self.spans_box,
+            text="Промежутки внутри возраста программы, лет",
+            font=FONT_S,
+            text_color=NAVY,
+            anchor="w",
+        ).grid(row=0, column=0, sticky="w")
+        self.span_rows_frame = ctk.CTkFrame(self.spans_box, fg_color="white")
+        self.span_rows_frame.grid(row=1, column=0, sticky="ew", pady=(6, 4))
+        actions = ctk.CTkFrame(self.spans_box, fg_color="white")
+        actions.grid(row=2, column=0, sticky="w")
+        add = secondary_button(actions, "Добавить промежуток", self._add_empty_span)
+        add.pack(side="left", padx=(0, 8))
+        split = secondary_button(actions, "Разбить по возрасту программы", self._fill_suggested)
+        split.pack(side="left")
+        tooltip(add, "Ещё одна строка «от» и «до». Промежутки не должны пересекаться.")
+        tooltip(split, "Подставит черновик по полям «Возраст от» и «Возраст до». Потом цифры можно поправить.")
+        self.span_note = ctk.CTkLabel(
+            self.spans_box,
+            text="",
+            font=FONT_S,
+            text_color=MUTED,
+            anchor="w",
+            justify="left",
+            wraplength=820,
+        )
+        self.span_note.grid(row=3, column=0, sticky="w", pady=(6, 0))
+        self._span_rows: list[tuple[ctk.CTkFrame, ctk.CTkEntry, ctk.CTkEntry]] = []
+
         self.no_prior = checkbox(body, "Без предварительной подготовки, свободный набор")
-        self.no_prior.grid(row=9, column=0, columnspan=2, sticky="w", pady=(4, 0))
+        self.no_prior.grid(row=10, column=0, columnspan=2, sticky="w", pady=(8, 0))
         tooltip(self.no_prior, "В адресате будет сказано, что до первого занятия отбора и подготовки нет.")
 
         self.calc_hint = ctk.CTkLabel(
@@ -111,6 +159,9 @@ class StepLearners(ctk.CTkScrollableFrame):
         self.calendar.set(model.calendar_mode)
         set_checkbox(self.differentiate, model.differentiate)
         set_checkbox(self.no_prior, model.no_prior_training)
+        spans = model.age_spans or suggest_age_spans(model.age_from, model.age_to)
+        self._show_spans(spans)
+        self._toggle_spans()
         self._refresh_calc()
 
     def save(self) -> None:
@@ -130,10 +181,92 @@ class StepLearners(ctk.CTkScrollableFrame):
         model.study_form = self.study_form.get()
         model.calendar_mode = self.calendar.get()
         model.differentiate = bool(self.differentiate.get())
+        model.age_spans = self._collect_spans()
         model.no_prior_training = bool(self.no_prior.get())
 
     def validate(self) -> list[str]:
         return self.app.model.errors_learners()
+
+    def _toggle_spans(self) -> None:
+        if bool(self.differentiate.get()):
+            self.spans_box.grid()
+            if not self._span_rows:
+                self._fill_suggested()
+        else:
+            self.spans_box.grid_remove()
+
+    def _show_spans(self, spans: list[dict]) -> None:
+        for row, _start, _end in self._span_rows:
+            row.destroy()
+        self._span_rows.clear()
+        for span in spans:
+            self._add_span_row(str(span.get("from", "")), str(span.get("to", "")))
+        self.span_note.configure(text="")
+
+    def _add_span_row(self, start: str, end: str) -> None:
+        row = ctk.CTkFrame(self.span_rows_frame, fg_color="white")
+        row.pack(fill="x", pady=2)
+        ctk.CTkLabel(row, text="от", font=FONT_S, text_color=MUTED).pack(side="left", padx=(0, 6))
+        start_entry = ctk.CTkEntry(row, width=72, height=34, font=FONT, border_color=LINE, fg_color="white")
+        start_entry.pack(side="left")
+        bind_text_shortcuts(start_entry)
+        if start:
+            start_entry.insert(0, start)
+        ctk.CTkLabel(row, text="до", font=FONT_S, text_color=MUTED).pack(side="left", padx=(10, 6))
+        end_entry = ctk.CTkEntry(row, width=72, height=34, font=FONT, border_color=LINE, fg_color="white")
+        end_entry.pack(side="left")
+        bind_text_shortcuts(end_entry)
+        if end:
+            end_entry.insert(0, end)
+        remove = ctk.CTkButton(
+            row,
+            text="Убрать",
+            width=84,
+            height=34,
+            font=FONT_S,
+            fg_color="#E8EEF5",
+            hover_color="#D5DEEA",
+            text_color=NAVY,
+            command=lambda current=row: self._remove_span(current),
+        )
+        remove.pack(side="left", padx=(12, 0))
+        self._span_rows.append((row, start_entry, end_entry))
+
+    def _add_empty_span(self) -> None:
+        collected = self._collect_spans()
+        age_to = parse_int(self.age_to.get())
+        if collected:
+            start = collected[-1]["to"] + 1
+        else:
+            start = parse_int(self.age_from.get())
+        end = start if age_to < start else min(start + 2, age_to)
+        if start < 0:
+            start, end = 0, 0
+        self._add_span_row("" if start <= 0 else str(start), "" if end <= 0 else str(end))
+
+    def _remove_span(self, row: ctk.CTkFrame) -> None:
+        self._span_rows = [item for item in self._span_rows if item[0] is not row]
+        row.destroy()
+
+    def _fill_suggested(self) -> None:
+        start = parse_int(self.age_from.get())
+        end = parse_int(self.age_to.get())
+        spans = suggest_age_spans(start, end)
+        if not spans:
+            self.span_note.configure(text="Сначала укажите возраст программы целыми годами от 5 до 18.")
+            return
+        self._show_spans(spans)
+        self.span_note.configure(text="Это черновик по возрасту программы. Поправьте годы, если промежутки другие.")
+
+    def _collect_spans(self) -> list[dict[str, int]]:
+        spans: list[dict[str, int]] = []
+        for _row, start_entry, end_entry in self._span_rows:
+            start = parse_int(start_entry.get())
+            end = parse_int(end_entry.get())
+            if start < 0 and end < 0:
+                continue
+            spans.append({"from": start, "to": end})
+        return spans
 
     def _refresh_calc(self) -> None:
         weekly = parse_int(self.weekly.get())

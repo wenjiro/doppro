@@ -139,6 +139,8 @@ class ProgramData:
     age_from: int = 11
     age_to: int = 17
     differentiate: bool = True
+    # Свои промежутки внутри возраста программы. Пустой список — разбить возраст самой.
+    age_spans: list = field(default_factory=list)
     years: int = 1
     total_hours: int = 144
     hours_per_week: int = 4
@@ -193,6 +195,7 @@ class ProgramData:
             "age_from": self.age_from,
             "age_to": self.age_to,
             "differentiate": self.differentiate,
+            "age_spans": self.age_spans,
             "years": self.years,
             "total_hours": self.total_hours,
             "hours_per_week": self.hours_per_week,
@@ -277,6 +280,7 @@ class ProgramData:
             setattr(data, name, str(getattr(data, name) or "").strip())
         if not isinstance(data.generated, dict):
             data.generated = {}
+        data.age_spans = _normalize_spans(getattr(data, "age_spans", []))
         return data
 
     def save_draft(self) -> None:
@@ -322,6 +326,41 @@ class ProgramData:
         errors.extend(self.errors_conditions())
         return errors
 
+    def effective_age_spans(self) -> list[dict[str, int]]:
+        """Промежутки для документа. Свои, если указаны, иначе разбиение возраста программы."""
+        if not self.differentiate:
+            if 0 <= self.age_from <= self.age_to:
+                return [{"from": self.age_from, "to": self.age_to}]
+            return []
+        own = _normalize_spans(self.age_spans)
+        if own:
+            return own
+        return suggest_age_spans(self.age_from, self.age_to)
+
+    def _span_errors(self) -> list[str]:
+        spans = _normalize_spans(self.age_spans) or suggest_age_spans(self.age_from, self.age_to)
+        if len(spans) < 2:
+            return ["Для дифференциации укажите хотя бы два возрастных промежутка или снимите галочку."]
+        errors: list[str] = []
+        for span in spans:
+            start, end = span["from"], span["to"]
+            if start < 0 or end < 0:
+                errors.append("В каждом промежутке укажите оба года целыми числами.")
+                continue
+            if not (5 <= start <= 18 and 5 <= end <= 18) or start > end:
+                errors.append(f"Промежуток {start}–{end} задайте целыми годами от 5 до 18, «от» не больше «до».")
+                continue
+            if start < self.age_from or end > self.age_to:
+                errors.append(
+                    f"Промежуток {start}–{end} не входит в возраст программы {self.age_from}–{self.age_to}."
+                )
+        ordered = sorted(spans, key=lambda item: (item["from"], item["to"]))
+        for previous, nxt in zip(ordered, ordered[1:]):
+            if nxt["from"] <= previous["to"]:
+                errors.append("Возрастные промежутки не должны пересекаться. Общий год оставьте только в одном.")
+                break
+        return errors
+
     def errors_passport(self) -> list[str]:
         errors: list[str] = []
         if len(self.title.strip()) < 3:
@@ -356,6 +395,8 @@ class ProgramData:
             errors.append("Возраст обучающихся должен быть в пределах от 5 до 18 лет.")
         elif self.age_from > self.age_to:
             errors.append("Возраст «от» не может быть больше возраста «до».")
+        elif self.differentiate:
+            errors.extend(self._span_errors())
         if self.years < 1 or self.years > 5:
             errors.append("Срок реализации — от 1 до 5 лет.")
         if self.total_hours < 8 or self.total_hours > 2000:
@@ -470,3 +511,42 @@ def _as_int(value: Any) -> int:
         return int(value)
     except (TypeError, ValueError):
         return -1
+
+
+def _normalize_spans(raw: Any) -> list[dict[str, int]]:
+    if not isinstance(raw, list):
+        return []
+    spans: list[dict[str, int]] = []
+    for item in raw:
+        if not isinstance(item, dict):
+            continue
+        start = _as_int(item.get("from", item.get("age_from", -1)))
+        end = _as_int(item.get("to", item.get("age_to", -1)))
+        if start < 0 or end < 0:
+            continue
+        spans.append({"from": start, "to": end})
+    return spans
+
+
+def suggest_age_spans(age_from: int, age_to: int) -> list[dict[str, int]]:
+    """Делит указанный возраст на промежутки примерно по 3 года. Это черновик, его правят вручную."""
+    if not (5 <= age_from <= 18 and 5 <= age_to <= 18) or age_from > age_to:
+        return []
+    length = age_to - age_from + 1
+    if length <= 1:
+        return [{"from": age_from, "to": age_to}]
+    if length <= 3:
+        cut = age_from + length // 2 - 1
+        cut = min(max(cut, age_from), age_to - 1)
+        return [{"from": age_from, "to": cut}, {"from": cut + 1, "to": age_to}]
+    count = max(2, round(length / 3))
+    while count > 2 and length / count < 2:
+        count -= 1
+    base, extra = divmod(length, count)
+    spans: list[dict[str, int]] = []
+    cursor = age_from
+    for index in range(count):
+        size = base + (1 if index >= count - extra else 0)
+        spans.append({"from": cursor, "to": cursor + size - 1})
+        cursor += size
+    return spans

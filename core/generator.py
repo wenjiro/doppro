@@ -7,6 +7,7 @@
 
 from __future__ import annotations
 
+import ast
 import json
 import re
 import uuid
@@ -117,6 +118,11 @@ def anonymous_brief(program: ProgramData) -> dict:
         "group_max": program.group_max,
         "no_prior_training": program.no_prior_training,
         "differentiate": program.differentiate,
+        "age_spans": (
+            [f"{item['from']}\u2013{item['to']}" for item in program.effective_age_spans()]
+            if program.differentiate
+            else []
+        ),
         "study_form": program.study_form.strip(),
         "modules": [
             {"name": item.name.strip(), "theory": item.theory, "practice": item.practice}
@@ -197,9 +203,17 @@ def _prompt(brief: dict) -> str:
         '"educating":["личностная задача","личностная задача"],'
         '"method":"как проходит занятие по этой теме",'
         '"subject":["наблюдаемый результат","результат","результат","результат"],'
-        '"modules":[{"theory":"что объясняют","practice":"что делают","tasks":"обязательное задание и задание с усложнением"}],'
+        '"modules":[{"theory":"что объясняют, связный текст","practice":"что делают, связный текст",'
+        '"form":"формы занятий через запятую","basic":"задание базового или стартового уровня",'
+        '"advanced":"усложнённое задание","skills":"навыки через запятую","abilities":"умения через запятую"}],'
         '"literature":["библиографическая запись по ГОСТ Р 7.0.100-2018"]} '
         "Число объектов в modules равно числу разделов и идёт в том же порядке. "
+        "В modules каждое поле — обычная строка, не вложенный объект и не фигурные скобки. "
+        "theory — что объясняют в этом разделе. practice — что делают руками или в игре. "
+        "form — формы занятий. basic — посильное задание базового или стартового уровня. "
+        "advanced — усложнённое задание той же темы. skills — предметные навыки через запятую. "
+        "abilities — умения вроде внимания, переключения и работы в группе, через запятую. "
+        "Пиши про тему раздела, а не общими словами направленности. "
         "Тема всех текстов — только title. direction задаёт область, но не подменяет название. "
         "Не пиши про 3D-моделирование, Blender, аддитивные технологии и любой другой чужой пример, если этих слов нет в title. "
         "Программу заполняют разные организации и разные направленности по всей России. "
@@ -217,7 +231,10 @@ def _prompt(brief: dict) -> str:
         "Электронный ресурс дополни строкой . — URL: адрес (дата обращения: ДД.ММ.ГГГГ). "
         "Не выдумывай ISBN, издательство и год. Если элемент неизвестен, пропусти его, но сохрани знаки ГОСТ у известных. "
         "Законы, приказы, СанПиН и СП в список литературы не включай. "
-        "Для возраста младше 14 лет опора на образец, для 14 и старше — больше самостоятельности, если возраст программы это покрывает.\n\n"
+        "Если age_spans не пуст, различай задания только по этим промежуткам: "
+        "чем младше промежуток в списке, тем больше опора на образец, чем старше — тем больше самостоятельности. "
+        "Не подставляй границы 11–13 и 14–17, если их нет в age_spans. "
+        "Средние промежутки опиши между образцом и самостоятельным планом.\n\n"
         "Данные программы:\n"
         + json.dumps(brief, ensure_ascii=False, indent=2)
     )
@@ -730,19 +747,98 @@ def _paragraphs(value, minimum: int, maximum: int) -> list[str]:
     return items
 
 
+_MODULE_KEYS = ("theory", "practice", "form", "basic", "advanced", "skills", "abilities")
+
+
+def normalize_module_row(item) -> dict[str, str]:
+    """Поля раздела — обычный текст. Словарь заданий не остаётся строкой Python."""
+    if not isinstance(item, dict):
+        return {key: "" for key in _MODULE_KEYS}
+    basic, advanced = _task_sides(item.get("basic") or item.get("starter"), item.get("advanced"), item.get("tasks"))
+    return {
+        "theory": _plain_piece(item.get("theory")),
+        "practice": _plain_piece(item.get("practice")),
+        "form": _plain_piece(item.get("form")),
+        "basic": basic,
+        "advanced": advanced,
+        "skills": _plain_piece(item.get("skills")),
+        "abilities": _plain_piece(item.get("abilities") or item.get("умения")),
+    }
+
+
 def _modules(value, count: int) -> list[dict[str, str]]:
     if not isinstance(value, list):
         return []
     rows: list[dict[str, str]] = []
     for item in value[:count]:
-        if not isinstance(item, dict):
-            rows.append({"theory": "", "practice": "", "tasks": ""})
-            continue
-        rows.append(
-            {
-                "theory": _clean(item.get("theory", "")),
-                "practice": _clean(item.get("practice", "")),
-                "tasks": _clean(item.get("tasks", "")),
-            }
-        )
+        rows.append(normalize_module_row(item))
     return rows
+
+
+def _maybe_mapping(value):
+    if isinstance(value, dict):
+        return value
+    if not isinstance(value, str):
+        return None
+    raw = value.strip()
+    if not (raw.startswith("{") and raw.endswith("}")):
+        return None
+    parsed = None
+    try:
+        parsed = ast.literal_eval(raw)
+    except (ValueError, SyntaxError):
+        parsed = None
+    if not isinstance(parsed, dict):
+        try:
+            parsed = json.loads(raw)
+        except json.JSONDecodeError:
+            return None
+    return parsed if isinstance(parsed, dict) else None
+
+
+def _plain_piece(value) -> str:
+    mapping = _maybe_mapping(value)
+    if mapping is not None:
+        return " ".join(bit for bit in (_plain_piece(item) for item in mapping.values()) if bit)
+    if isinstance(value, list):
+        return " ".join(bit for bit in (_plain_piece(item) for item in value) if bit)
+    if value is None:
+        return ""
+    return _clean(value)
+
+
+def _task_sides(basic, advanced, tasks) -> tuple[str, str]:
+    basic_text = _plain_piece(basic)
+    advanced_text = _plain_piece(advanced)
+    if basic_text and advanced_text:
+        return basic_text, advanced_text
+    unpacked_basic, unpacked_advanced = _unpack_tasks(tasks)
+    return basic_text or unpacked_basic, advanced_text or unpacked_advanced
+
+
+def _unpack_tasks(value) -> tuple[str, str]:
+    mapping = _maybe_mapping(value)
+    if mapping is not None:
+        basic = _pick_task(mapping, ("обязатель", "базов", "стартов"))
+        advanced = _pick_task(mapping, ("усложн",))
+        if not basic and not advanced:
+            pieces = [_plain_piece(item) for item in mapping.values()]
+            pieces = [item for item in pieces if item]
+            basic = pieces[0] if pieces else ""
+            advanced = pieces[1] if len(pieces) > 1 else ""
+        return basic, advanced
+    text = _plain_piece(value)
+    for marker in ("Усложнённое задание", "Усложненное задание", "Задание с усложнением", "задание с усложнением", "Усложнение"):
+        if marker in text:
+            left, right = text.split(marker, 1)
+            right = right.lstrip(" :.—-")
+            return left.strip(), right.strip()
+    return text, ""
+
+
+def _pick_task(mapping: dict, markers: tuple[str, ...]) -> str:
+    for key, item in mapping.items():
+        folded = str(key).casefold().replace("ё", "е")
+        if any(marker in folded for marker in markers):
+            return _plain_piece(item)
+    return ""
