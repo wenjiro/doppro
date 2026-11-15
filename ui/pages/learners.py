@@ -156,7 +156,7 @@ class LearnersPage(StepPage):
         line.setSpacing(14)
         self.calendar_button = Button(
             "Недели занятий", "teal", Glyph.CALENDAR, on=self._open_calendar,
-            tip="Сначала отметьте дни недели. Календарь подсветит их. Если день праздничный, занятие сдвигается на следующий свободный.",
+            tip="Сначала отметьте дни недели. Календарь подсветит их. Праздник переносит занятие на следующий учебный день графика, а не на ближайший календарный.",
         )
         line.addWidget(self.calendar_button)
         self.calendar_note = label("", "muted", wrap=True)
@@ -294,7 +294,11 @@ class LearnersPage(StepPage):
         else:
             scope = "праздники России. Дополнительные дни региона запрашиваются в «Неделях занятий»"
         if self._custom_weeks and self._class_weeks:
-            text = f"Отмечено недель: {len(self._class_weeks)}. Праздничный день переносит занятие. Учитываются {scope}."
+            text = (
+                f"Отмечено недель: {len(self._class_weeks)}. "
+                "Праздничный день переносит занятие на следующий учебный день графика. "
+                f"Учитываются {scope}."
+            )
         else:
             text = f"Недели пока не выбраны: возьмутся первые учебные недели графика. Учитываются {scope}."
         self.calendar_note.setText(text)

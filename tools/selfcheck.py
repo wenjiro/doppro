@@ -492,8 +492,9 @@ def main() -> None:
         {republic_monday.isoformat()},
     )
     assert republic_monday not in moved
-    assert moved[date(2026, 10, 13)] == "shift"
-    assert moved[date(2026, 10, 14)] == "plan"
+    assert date(2026, 10, 13) not in moved
+    assert moved[date(2026, 10, 14)] == "shift"
+    assert moved[date(2026, 10, 19)] == "shift"
     pushed = class_placements(
         [republic_monday],
         {0, 1},
@@ -501,7 +502,24 @@ def main() -> None:
         {republic_monday.isoformat()},
     )
     assert pushed[date(2026, 10, 13)] == "shift"
-    assert pushed[date(2026, 10, 14)] == "shift"
+    assert date(2026, 10, 14) not in pushed
+    assert pushed[date(2026, 10, 19)] == "shift"
+    thursday_weeks = [date(2026, 11, 2), date(2026, 11, 9), date(2026, 11, 16)]
+    thursday_holiday = date(2026, 11, 5)
+    along_graph = class_placements(
+        thursday_weeks,
+        {0, 3},
+        lambda day: day == thursday_holiday,
+        {day.isoformat() for day in thursday_weeks},
+    )
+    assert thursday_holiday not in along_graph
+    assert date(2026, 11, 6) not in along_graph
+    assert along_graph[date(2026, 11, 2)] == "plan"
+    assert along_graph[date(2026, 11, 9)] == "shift"
+    assert along_graph[date(2026, 11, 12)] == "shift"
+    assert along_graph[date(2026, 11, 16)] == "shift"
+    assert along_graph[date(2026, 11, 19)] == "shift"
+    assert along_graph[date(2026, 11, 23)] == "shift"
     shifted = lesson_dates(
         2026,
         4,
@@ -512,7 +530,7 @@ def main() -> None:
         1,
         weekdays=[0],
     )
-    assert shifted == ["13.10.2026"]
+    assert shifted == ["19.10.2026"]
     assert sum(
         int(row["hours"])
         for row in build_calendar_rows(

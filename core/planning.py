@@ -387,42 +387,56 @@ def class_placements(
     is_holiday,
     selected: set[str] | None = None,
 ) -> dict[date, str]:
-    """Каждое занятие выбранных дней. Праздник или занятый день переносит его вперёд.
+    """Каждое занятие только в выбранные дни недели.
 
-    Сначала ищется день той же недели, затем день следующей отмеченной учебной недели.
-    «plan» — занятие в свой день, «shift» — перенос.
+    Праздник не переносит занятие на ближайший календарный день. Занятие и все
+    следующие сдвигаются по графику: при занятиях в понедельник и четверг
+    праздничный четверг уходит на следующий понедельник, а не на пятницу.
+    «plan» — занятие в свой день, «shift» — перенос с предыдущего дня графика.
     """
-    taken: dict[date, str] = {}
-    chosen = {int(day) for day in weekdays if 0 <= int(day) <= 6}
-    selected_weeks = set(selected) if selected is not None else None
+    chosen = sorted({int(day) for day in weekdays if 0 <= int(day) <= 6})
+    if not chosen:
+        return {}
+    selected_weeks = None if selected is None else {str(item) for item in selected}
+    weeks = sorted({monday for monday in mondays})
 
-    def free(day: date, origin: date) -> bool:
-        if day in taken or is_holiday(day):
-            return False
-        week = day - timedelta(days=day.weekday())
-        if week == origin:
-            return True
+    def teaching(monday: date) -> bool:
         if selected_weeks is None:
             return True
-        return week.isoformat() in selected_weeks
+        return monday.isoformat() in selected_weeks
 
-    for monday in sorted(mondays):
-        if selected_weeks is not None and monday.isoformat() not in selected_weeks:
+    slots: list[date] = []
+    for monday in weeks:
+        if not teaching(monday):
             continue
-        for offset in sorted(chosen):
-            planned = monday + timedelta(days=offset)
-            slot = planned if free(planned, monday) else None
-            if slot is None:
-                cursor = planned + timedelta(days=1)
-                for _ in range(60):
-                    if free(cursor, monday):
-                        slot = cursor
-                        break
-                    cursor += timedelta(days=1)
-            if slot is None:
+        for offset in chosen:
+            slots.append(monday + timedelta(days=offset))
+    if not slots:
+        return {}
+
+    open_days = [day for day in slots if not is_holiday(day)]
+    known = set(weeks)
+    cursor = slots[-1] - timedelta(days=slots[-1].weekday()) + timedelta(days=7)
+    guard = 0
+    while len(open_days) < len(slots) and guard < 60:
+        if cursor in known:
+            cursor += timedelta(days=7)
+            guard += 1
+            continue
+        for offset in chosen:
+            day = cursor + timedelta(days=offset)
+            if is_holiday(day):
                 continue
-            taken[slot] = "plan" if slot == planned else "shift"
-    return taken
+            open_days.append(day)
+            if len(open_days) >= len(slots):
+                break
+        cursor += timedelta(days=7)
+        guard += 1
+
+    placed: dict[date, str] = {}
+    for planned, actual in zip(slots, open_days):
+        placed[actual] = "plan" if actual == planned else "shift"
+    return placed
 
 
 def lesson_dates(
@@ -436,7 +450,7 @@ def lesson_dates(
     extra: list | None = None,
     weekdays: list[int] | None = None,
 ) -> list[str]:
-    """Предполагаемые даты занятий. Праздник переносит занятие, а не отменяет его."""
+    """Предполагаемые даты занятий. Праздник сдвигает занятие по дням графика, а не отменяет его."""
     if count <= 0:
         return []
     chosen = effective_class_days(weekdays, per_week)
@@ -464,7 +478,7 @@ def lesson_dates(
         return day in holiday_dates(day.year, region, extra)
 
     placed = class_placements(mondays, set(chosen), is_holiday, selected)
-    found = [day.strftime("%d.%m.%Y") for day in sorted(placed) if start <= day <= finish]
+    found = [day.strftime("%d.%m.%Y") for day in sorted(placed) if day >= start]
     return found[:count]
 
 
@@ -492,6 +506,8 @@ def holiday_note(year: int, mode: str, region: str = "", years: int = 1, extra: 
     return (
         f"{scope} В отмеченные недели занятия не ставятся в эти дни: {listing}. "
         "Если праздник попал на субботу или воскресенье, следующий рабочий день тоже выходной. "
+        "Само занятие переносится не на ближайший календарный день, а на следующий учебный день расписания. "
+        "Остальные занятия сдвигаются только по дням графика. "
         f"Перенос по отдельному постановлению Правительства на год можно убрать, сняв неделю.{tail}"
     )
 
