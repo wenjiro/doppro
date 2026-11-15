@@ -531,6 +531,11 @@ def _complete(prompt: str) -> str:
     return _gemini(key, prompt)
 
 
+def check_connection() -> str:
+    """Пробный запрос выбранному сервису. Данных программы в нём нет."""
+    return _complete("Ответь одним словом: работает.")
+
+
 def _request(api_key: str, prompt: str) -> str:
     # Тот же вызов, что в документации AI Studio: interactions, а не старый generateContent.
     # thinking_level low — иначе модель долго «думает» и запрос обрывается по времени.

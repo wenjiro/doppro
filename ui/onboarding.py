@@ -5,11 +5,12 @@ from __future__ import annotations
 
 import json
 
-import customtkinter as ctk
+from PySide6.QtCore import Qt
+from PySide6.QtWidgets import QDialog, QFrame, QHBoxLayout, QLabel, QVBoxLayout
 
 from core.paths import onboarding_path
-from gui.theme import FONT, FONT_H, FONT_S, MUTED, NAVY
-from gui.widgets import primary_button, secondary_button
+from ui.theme import Glyph
+from ui.widgets import Button, GlyphLabel, label, set_prop
 
 PAGES = (
     (
@@ -17,13 +18,15 @@ PAGES = (
         "ДопПро собирает дополнительную общеобразовательную программу в файл Word.\n\n"
         "Впереди пять шагов. Поля со звёздочкой обязательны. Серый текст внутри поля — пример: "
         "в документ он не попадёт, пока вы его не впишете.\n\n"
-        "Черновик сохраняется на этом компьютере, когда вы нажимаете «Далее» или закрываете окно. "
-        "Несколько разных программ хранит кнопка «Мои программы».",
+        "Всё введённое сохраняется само на этом компьютере. Шаги слева можно открывать в любом порядке: "
+        "галочка у шага значит, что он заполнен, жёлтая цифра — сколько мест осталось поправить. "
+        "Все ваши программы лежат на экране «Мои программы».",
     ),
     (
         "Паспорт",
         "Укажите название, направленность, свою организацию и свои данные. "
         "Краткое название организации попадает в строку составителя.\n\n"
+        "Регион и населённый пункт можно выбрать из списка или вписать свои. "
         "Серый текст в пустом поле — только подсказка. В документ он не попадает.",
     ),
     (
@@ -47,11 +50,14 @@ PAGES = (
     ),
     (
         "Где это найти потом",
-        "Ключ нейросети хранится в «Настройках» и остаётся только на этом компьютере.\n\n"
-        "Это окно можно открыть снова кнопкой «Помощь» рядом с настройками. "
+        "Ключ нейросети хранится в «Настройках» и остаётся только на этом компьютере. "
+        "Там же можно проверить, что ключ работает, и выбрать светлую или тёмную тему.\n\n"
+        "Это окно можно открыть снова кнопкой «Помощь» в левой панели. "
         "Подсказка к кнопке или полю появляется, если задержать на нём курсор.",
     ),
 )
+
+_GLYPHS = (Glyph.PLAY, Glyph.DOCUMENT, Glyph.CALENDAR, Glyph.LIST, Glyph.SETTINGS)
 
 
 def onboarding_seen() -> bool:
@@ -67,70 +73,70 @@ def onboarding_seen() -> bool:
 
 def mark_onboarding_seen() -> None:
     try:
-        onboarding_path().write_text(
-            json.dumps({"seen": True}, ensure_ascii=False),
-            encoding="utf-8",
-        )
+        onboarding_path().write_text(json.dumps({"seen": True}, ensure_ascii=False), encoding="utf-8")
     except OSError:
         return
 
 
-class OnboardingDialog(ctk.CTkToplevel):
-    def __init__(self, app):
-        super().__init__(app)
-        self.app = app
+class OnboardingDialog(QDialog):
+    def __init__(self, parent=None):
+        super().__init__(parent)
         self.page = 0
-        self.title("ДопПро")
-        self.resizable(False, False)
-        self.configure(fg_color="white")
-        self.geometry("640x460")
-        self.transient(app)
-        self.grid_columnconfigure(0, weight=1)
-        self.grid_rowconfigure(1, weight=1)
+        self.setWindowTitle("ДопПро — знакомство")
+        self.setModal(True)
+        self.setFixedSize(660, 470)
+        outer = QVBoxLayout(self)
+        outer.setContentsMargins(0, 0, 0, 0)
+        surface = QFrame()
+        surface.setObjectName("dialogSurface")
+        outer.addWidget(surface)
+        box = QVBoxLayout(surface)
+        box.setContentsMargins(32, 28, 32, 22)
+        box.setSpacing(12)
 
-        self.heading = ctk.CTkLabel(self, text="", font=FONT_H, text_color=NAVY, anchor="w")
-        self.heading.grid(row=0, column=0, sticky="ew", padx=28, pady=(22, 8))
-        self.body = ctk.CTkLabel(
-            self,
-            text="",
-            font=FONT,
-            text_color="#1A1A1A",
-            anchor="nw",
-            justify="left",
-            wraplength=580,
-        )
-        self.body.grid(row=1, column=0, sticky="nsew", padx=28, pady=(0, 8))
-        self.counter = ctk.CTkLabel(self, text="", font=FONT_S, text_color=MUTED, anchor="w")
-        self.counter.grid(row=2, column=0, sticky="w", padx=28)
+        head = QHBoxLayout()
+        head.setSpacing(12)
+        self.icon = GlyphLabel(_GLYPHS[0], "teal", 26)
+        head.addWidget(self.icon)
+        self.heading = label("", "h1")
+        head.addWidget(self.heading, 1)
+        box.addLayout(head)
 
-        buttons = ctk.CTkFrame(self, fg_color="white")
-        buttons.grid(row=3, column=0, sticky="ew", padx=22, pady=(8, 18))
-        self.back = secondary_button(buttons, "Назад", self._back)
-        self.back.pack(side="left")
-        self.next = primary_button(buttons, "Далее", self._next)
-        self.next.pack(side="right")
+        self.body = label("", wrap=True)
+        self.body.setAlignment(Qt.AlignTop | Qt.AlignLeft)
+        self.body.setStyleSheet("font-size: 15px; line-height: 150%;")
+        box.addWidget(self.body, 1)
 
-        self.protocol("WM_DELETE_WINDOW", self._finish)
+        foot = QHBoxLayout()
+        self.dots: list[QLabel] = []
+        for _ in PAGES:
+            dot = QLabel()
+            dot.setFixedSize(8, 8)
+            dot.setProperty("role", "index")
+            self.dots.append(dot)
+            foot.addWidget(dot)
+        foot.addStretch(1)
+        self.back = Button("Назад", on=self._back)
+        self.next = Button("Далее", "primary", on=self._next)
+        self.next.setDefault(True)
+        foot.addWidget(self.back)
+        foot.addWidget(self.next)
+        box.addLayout(foot)
         self._show()
-        self.update_idletasks()
-        self._place()
-        self.grab_set()
-        self.focus()
-
-    def _place(self) -> None:
-        parent = self.app
-        parent.update_idletasks()
-        x = parent.winfo_rootx() + max(0, (parent.winfo_width() - 640) // 2)
-        y = parent.winfo_rooty() + max(0, (parent.winfo_height() - 460) // 2)
-        self.geometry(f"640x460+{x}+{y}")
 
     def _show(self) -> None:
+        from ui.theme import theme
+
         title, text = PAGES[self.page]
-        self.heading.configure(text=title)
-        self.body.configure(text=text)
-        self.counter.configure(text=f"{self.page + 1} из {len(PAGES)}")
-        self.back.configure(state="normal" if self.page else "disabled")
-        self.next.configure(text="Понятно" if self.page == len(PAGES) - 1 else "Далее")
+        self.heading.setText(title)
+        self.body.setText(text)
+        self.icon.set_glyph(_GLYPHS[self.page], "teal")
+        for index, dot in enumerate(self.dots):
+            color = theme.p["teal"] if index == self.page else theme.p["line_strong"]
+            dot.setStyleSheet(f"background: {color}; border-radius: 4px;")
+        self.back.setEnabled(self.page > 0)
+        self.next.setText("Понятно" if self.page == len(PAGES) - 1 else "Далее")
+        set_prop(self.next, "kind", "primary")
 
     def _back(self) -> None:
         if self.page:
@@ -142,8 +148,8 @@ class OnboardingDialog(ctk.CTkToplevel):
             self.page += 1
             self._show()
             return
-        self._finish()
+        self.accept()
 
-    def _finish(self) -> None:
+    def done(self, code: int) -> None:
         mark_onboarding_seen()
-        self.destroy()
+        super().done(code)

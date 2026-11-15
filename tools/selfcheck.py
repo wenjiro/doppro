@@ -38,7 +38,7 @@ from core.library import duplicate_program, export_program, import_program, list
 from core.paths import project_root
 from core.places import places_for, regions, resolve_region
 from core.updates import is_newer
-from gui.onboarding import PAGES, onboarding_seen
+from ui.onboarding import PAGES, onboarding_seen
 from core.templates_engine import build_context, profile_for
 from core.tls import app_ssl_context
 

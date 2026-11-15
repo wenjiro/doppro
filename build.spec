@@ -12,7 +12,6 @@ from PyInstaller.utils.hooks import collect_data_files, collect_submodules
 root = Path(SPECPATH)
 
 datas = []
-datas += collect_data_files("customtkinter")
 datas += collect_data_files("docx")
 datas += [
     (str(root / "assets"), "assets"),
@@ -41,7 +40,23 @@ a = Analysis(
     hookspath=[],
     hooksconfig={},
     runtime_hooks=[],
-    excludes=[],
+    excludes=[
+        "tkinter",
+        "PySide6.QtQml",
+        "PySide6.QtQuick",
+        "PySide6.QtQuickWidgets",
+        "PySide6.QtNetwork",
+        "PySide6.QtOpenGL",
+        "PySide6.QtOpenGLWidgets",
+        "PySide6.QtPdf",
+        "PySide6.QtSql",
+        "PySide6.QtSvg",
+        "PySide6.QtTest",
+        "PySide6.QtXml",
+        "PySide6.QtDBus",
+        "PySide6.QtConcurrent",
+        "PySide6.QtPrintSupport",
+    ],
     noarchive=False,
     optimize=0,
 )
